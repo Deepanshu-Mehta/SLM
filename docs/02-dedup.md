@@ -90,8 +90,8 @@ decontam workers (case-law 10 + sec 5 = `DECONTAM_SOURCES`). Non-zero, so the
 not a new fault. The LexGLUE `case_hold` config supplied the full 480,908-gram
 set and covers the same CaseHOLD benchmark, so decontamination is intact.
 
-Worth noting the asymmetry: 11.6% of case-law was dropped as CaseHOLD-contaminated
-versus 0.4% of SEC — expected, since CaseHOLD is built from court opinions.
+Worth noting the asymmetry: 10.3% of case-law documents entering Phase 2
+(24,002 of 232,292) were dropped as CaseHOLD-contaminated versus 0.37% of SEC (175 of 47,199) — expected, since CaseHOLD is built from court opinions.
 fineweb-edu is not in `DECONTAM_SOURCES` and was not scanned.
 
 ### Independent verification (on-Volume bytes)

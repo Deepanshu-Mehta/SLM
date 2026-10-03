@@ -149,26 +149,34 @@ def generate(req: GenerateRequest) -> dict[str, Any]:
 def generate_stream(req: GenerateRequest) -> StreamingResponse:
     x = encode_prompt(req.prompt, req.max_new_tokens)
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    result: dict[str, Any] = {}
+    finished = threading.Event()
 
     def run() -> None:
         try:
             with LOCK, torch.no_grad():
                 if req.seed is not None:
                     torch.manual_seed(req.seed)
-                model.generate(x, attention_mask=torch.ones_like(x), streamer=streamer,
-                               **generation_kwargs(req))
+                out = model.generate(x, attention_mask=torch.ones_like(x), streamer=streamer,
+                                     **generation_kwargs(req))
+            new = out[0, x.shape[1]:].tolist()
+            result.update(new_tokens=len(new), stopped_on_eos=bool(new) and new[-1] == EOS_ID)
         except Exception:  # never leave the client waiting on a dead generation
             streamer.end()
             raise
+        finally:
+            finished.set()
 
     def events() -> Iterator[str]:
-        t0, pieces = time.time(), 0
+        # Streamed pieces are text chunks (the streamer flushes at word boundaries), not
+        # tokens; the true token count arrives in the final "done" event.
+        t0 = time.time()
         threading.Thread(target=run, daemon=True).start()
         for piece in streamer:
             if piece:
-                pieces += 1
                 yield f"data: {json.dumps({'token': piece})}\n\n"
-        yield f"data: {json.dumps({'done': True, 'elapsed_ms': round((time.time() - t0) * 1000)})}\n\n"
+        finished.wait(timeout=10)
+        yield f"data: {json.dumps({'done': True, 'elapsed_ms': round((time.time() - t0) * 1000), 'prompt_tokens': x.shape[1] - 1, **result})}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

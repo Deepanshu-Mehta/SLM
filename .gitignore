@@ -15,3 +15,8 @@ index.json
 *.safetensors
 data/
 .smoke/
+
+# Website (frontend) — kept out of version control by request; not part of model training
+site/
+site_data.py
+site_examples.py

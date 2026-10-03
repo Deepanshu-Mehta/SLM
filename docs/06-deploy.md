@@ -157,3 +157,10 @@ every request was redirected (HTTP 303) after 150 s. `serve_modal.py` imports `c
 which wasn't in the image. Fix: `.add_local_python_source("config")`. This is the same
 class of mistake as the earlier `verify_tokens.py` crash, and the lesson is the same: a
 Modal image must contain every module the *entrypoint file* imports, not just the server.
+
+### Stream fix (2026-10-03)
+
+`/generate/stream` events are **text chunks, not tokens**. `TextIteratorStreamer` flushes at
+word boundaries, so 30 tokens arrive as about 27 events. The final `done` event now carries
+the true `new_tokens`, `prompt_tokens` and `stopped_on_eos`, read from the generate output.
+Verified live: 27 events, then `{"done": true, "new_tokens": 30, ...}`.

@@ -417,6 +417,14 @@ TOKENIZE_SHARDS = {"case-law": 4, "sec": 6, "fineweb-edu": 4}
 ENCODE_BATCH = 1_000
 
 
+def _is_val_doc(text: str) -> bool:
+    """Document-level split. blake2b is stable across processes; hash() is not."""
+    import hashlib
+
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % config.VAL_ONE_IN_N_DOCS == 0
+
+
 @app.function(image=ml_image, volumes=VOLUMES, timeout=60 * 40, cpu=8.0, memory=16_384)
 def tokenize_shard(source_name: str, shard_index: int, num_shards: int) -> dict:
     import glob
@@ -432,8 +440,9 @@ def tokenize_shard(source_name: str, shard_index: int, num_shards: int) -> dict:
     os.makedirs(config.VAL_TOKENS_DIR, exist_ok=True)
     train_path = f"{config.TRAIN_TOKENS_DIR}/{source_name}-{shard_index:03d}.bin"
     val_path = f"{config.VAL_TOKENS_DIR}/{source_name}-{shard_index:03d}.bin"
-    buf: list[int] = []
-    win_count = n_train = n_val = 0
+    train_buf: list[int] = []
+    val_buf: list[int] = []
+    n_train = n_val = train_docs = val_docs = 0
     corpus_files = sorted(glob.glob(f"{config.CORPUS_DIR}/{source_name}/*.txt"))
 
     def _doc_iter():
@@ -448,23 +457,30 @@ def tokenize_shard(source_name: str, shard_index: int, num_shards: int) -> dict:
     with open(train_path, "wb") as ftr, open(val_path, "wb") as fva:
         batch: list[str] = []
 
+        def _pack(buf: list[int], fh) -> int:
+            n = 0
+            while len(buf) >= seq_len:
+                np.asarray(buf[:seq_len], dtype=np.uint16).tofile(fh)
+                del buf[:seq_len]
+                n += 1
+            return n
+
         def _flush():
-            nonlocal win_count, n_train, n_val
+            nonlocal n_train, n_val, train_docs, val_docs
             if not batch:
                 return
-            for ids in tok(batch, add_special_tokens=False)["input_ids"]:
-                buf.extend(ids)
-                buf.append(eos_id)
-            while len(buf) >= seq_len:
-                window = np.asarray(buf[:seq_len], dtype=np.uint16)
-                del buf[:seq_len]
-                if win_count % config.VAL_EVERY_N_WINDOWS == 0:
-                    window.tofile(fva)
-                    n_val += 1
+            encoded = tok(batch, add_special_tokens=False)["input_ids"]
+            for doc, ids in zip(batch, encoded):
+                if _is_val_doc(doc):
+                    val_buf.extend(ids)
+                    val_buf.append(eos_id)
+                    val_docs += 1
                 else:
-                    window.tofile(ftr)
-                    n_train += 1
-                win_count += 1
+                    train_buf.extend(ids)
+                    train_buf.append(eos_id)
+                    train_docs += 1
+            n_train += _pack(train_buf, ftr)
+            n_val += _pack(val_buf, fva)
 
         for doc in _doc_iter():
             batch.append(doc)
@@ -474,9 +490,10 @@ def tokenize_shard(source_name: str, shard_index: int, num_shards: int) -> dict:
         _flush()
     volume.commit()
     print(f"[{source_name} {shard_index:03d}] train_win={n_train} val_win={n_val} "
-          f"train_tok={n_train*seq_len/1e6:.1f}M")
+          f"train_docs={train_docs} val_docs={val_docs} train_tok={n_train*seq_len/1e6:.1f}M")
     return {"source": source_name, "shard": shard_index, "train_windows": n_train,
-            "val_windows": n_val, "train_tokens": n_train * seq_len, "val_tokens": n_val * seq_len}
+            "val_windows": n_val, "train_tokens": n_train * seq_len, "val_tokens": n_val * seq_len,
+            "train_docs": train_docs, "val_docs": val_docs}
 
 
 @app.function(image=ml_image, volumes=VOLUMES)
@@ -484,7 +501,9 @@ def write_token_index(results: list) -> dict:
     import json
 
     shards = [r for r in results if r]
-    total = {"seq_len": config.SEQ_LEN, "dtype": config.TOKENS_DTYPE,
+    total = {"seq_len": config.SEQ_LEN, "dtype": config.TOKENS_DTYPE, "split": "document",
+             "train_docs": sum(r["train_docs"] for r in shards),
+             "val_docs": sum(r["val_docs"] for r in shards),
              "train_windows": sum(r["train_windows"] for r in shards),
              "val_windows": sum(r["val_windows"] for r in shards),
              "train_tokens": sum(r["train_tokens"] for r in shards),

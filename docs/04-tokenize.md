@@ -1,6 +1,6 @@
 # Phase 4 — Tokenize, pack into 1024-token uint16 windows, split 99/1
 
-**Compute:** 14 CPU containers (8 vCPU, 16 GB each) · **Expected cost:** ~$0 · **Status:** DONE (with one documented deviation)
+**Compute:** 14 CPU containers (8 vCPU, 16 GB each) · **Expected cost:** ~$0 · **Status:** DONE — **v2 (document-level split) is current**; v1 below is the historical record
 
 ## What this phase does
 
@@ -135,3 +135,104 @@ failure GUIDE §8.5 warns about and the reason the per-shard fan-out must not be
 collapsed into one container. One preempted container's stdout line was lost from
 the local log (13 lines for 14 shards), which is why completeness was confirmed
 from `index.json` rather than from log lines.
+
+
+---
+
+# v2 rebuild — document-level validation split
+
+**Approved:** 2026-10-03 · **Compute:** same 14 CPU workers · **Cost:** ~$0 · **Status:** DONE
+
+## Why v1 is being replaced
+
+v1 (above) followed the GUIDE: every 100th **window** went to val. Documents span
+windows, so the rest of each val document stayed in train — an SEC val window has
+~18 sibling windows of the same filing in training (case-law ~2–3, fineweb ~0).
+With 4 training epochs over those siblings, SEC val loss would measure recall of
+specific filings rather than generalisation, and a val set that shares documents
+with train tends to *fall with* train loss — hiding the very overfitting that 4
+epochs risks. v1's numbers above are kept as the historical record.
+
+## What changes (and what doesn't)
+
+Only the routing inside `tokenize_shard` changes. Tokenizer, corpus, packing
+(EOS after each document, 1024-token `uint16` windows, no padding), worker layout
+and file names are all unchanged; v2 files overwrite v1 files in place.
+
+- Each **document** goes wholly to val when
+  `blake2b(utf-8 text, 8 bytes) % 100 == 0` (`config.VAL_ONE_IN_N_DOCS = 100`),
+  otherwise wholly to train.
+- Train and val pack into **separate** buffers, so a window never mixes the two.
+- The hash is a pure function of the document text: stable across processes and
+  workers. Python's `hash()` is deliberately **not** used — it is salted per process.
+- Side benefit: an exact duplicate that survived per-shard dedup (identical text in
+  two shards) hashes identically, so both copies land on the **same** side. It
+  cannot leak across the split. (Near-duplicates in SEC/fineweb still can — they
+  were never near-deduped. Known, small.)
+- `index.json` gains `"split": "document"` and train/val document counts.
+
+## Validation criteria (v2)
+
+| # | Check | Expected |
+|---|---|---|
+| 1 | 14/14 workers, no duplicate or missing shard | in `index.json` |
+| 2 | val document share | ≈1.0% of documents per source |
+| 3 | val token share | ≈1% (noisier than v1: SEC filings average ~19K tokens) |
+| 4 | total tokens | ≈ v1 total (2.06B), minus ≤ 2×1023 tail tokens per shard |
+| 5 | `.bin` window alignment | 0 violations (`verify_tokens.py`) |
+| 6 | doc counts reconcile | Σ val_docs + Σ train_docs = 670,124 corpus docs |
+| 7 | preflight invariants + **new BPB constant** | `verify_model.py` passes; BPB factor re-measured on the new val split |
+| 8 | `pretrain_steps()` | re-derived from the new index (≈15.5K) |
+
+## Results (v2)
+
+Run `ap-*` (detached, 14/14 workers, no preemptions) · verified by
+`verify_tokens.py` (`ap-PF7IXNifwm44tiLP9cUdRd`) and `verify_model.py`
+(`ap-332ROS5YsJCefQATzAq5S1`). **All 8 checks passed.**
+
+```
+index: train=2.04B tok (1,992,274 win), val=19.6M tok (19,119 win)   split=document
+```
+
+| # | Check | Result |
+|---|---|---|
+| 1 | shards | 14/14, no duplicates, none missing ✓ |
+| 2 | val document share | **0.991%** (6,638 of 670,124) ✓ |
+| 3 | val token share | **0.951%** ✓ |
+| 4 | total vs v1 | 2,059,666,432 vs 2,059,674,624 = **−8,192 tokens** (8 windows: each shard now has two partial tail buffers instead of one) ✓ |
+| 5 | window alignment | **0 violations**; disk = index exactly ✓ |
+| 6 | doc reconciliation | 663,486 train + 6,638 val = **670,124** = corpus — every document routed exactly once ✓ |
+| 7 | preflight invariants | ALL HOLD; `<\|bos\|>` still 0×; **new BPB factor 0.308978** ✓ |
+| 8 | `pretrain_steps()` | **15,564** (v1: 15,556), re-derived from the index automatically ✓ |
+
+### Per source
+
+| Source | Train tokens | Train share | Val tokens | Val share | Val docs / all docs |
+|---|---|---|---|---|---|
+| case-law | 715.3M | 35.1% | 6.79M | 34.7% | 1,992 / 206,684 = 0.964% |
+| sec | 860.6M | 42.2% | 8.12M | 41.5% | 428 / 45,035 = 0.950% |
+| fineweb-edu | 464.2M | 22.8% | 4.66M | 23.8% | 4,218 / 418,405 = 1.008% |
+
+The val mix mirrors the train mix to within ~1 point per source, so val loss stays
+representative of the training distribution while now being genuinely held out at
+the document level. SEC val is 428 complete filings (8.1M tokens) — small in count,
+but each is a whole unseen document, which is the point.
+
+### What else changed in the data (and why it is fine)
+
+- **Bits-per-byte factor:** val bytes/token 4.669241 → `BPB = loss × 0.308978`
+  (v1: 0.309145). Per source: case-law 4.4796, sec 5.0437, fineweb 4.2929 bytes/token.
+- **Train windows now start at document boundaries** where v1's did not: decoded
+  first windows read "The petition filed in this Court…", "Cummins Engine Company,
+  Inc.…", "For all the love, romance and scandal in Jane Austen's books…".
+- **Routing is cross-process stable.** Local test before launch: 200,000 synthetic
+  docs → 1.0095% to val with an identical split fingerprint under three different
+  `PYTHONHASHSEED` values (while Python's own `hash()` changed every time).
+
+### Code change (the only edit to the verbatim Phase 4 logic)
+
+`modal_app.py`: new `_is_val_doc()` (blake2b of the document text,
+`% config.VAL_ONE_IN_N_DOCS`); `tokenize_shard` routes whole documents into separate
+`train_buf` / `val_buf` and packs each independently; shard results and `index.json`
+record `train_docs` / `val_docs` and `"split": "document"`. `config.py`:
+`VAL_EVERY_N_WINDOWS` → `VAL_ONE_IN_N_DOCS`. +55/−20 lines.

@@ -10,7 +10,7 @@ Last updated: 2026-10-03
 | 2 | Dedup + decontaminate | CPU fan-out ×20 | ~$0 | **DONE** |
 | 3 | Train 16K byte-level BPE tokenizer | CPU ×1 (8 vCPU) | ~$0 | **DONE** |
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
-| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **~$48 est., $50 cap — HARD GATE** | ⛔ **AWAITING APPROVAL** |
+| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **~$37–49 est., $50 cap — HARD GATE** | ⛔ **AWAITING APPROVAL** |
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 | PENDING |
 
 ---
@@ -199,7 +199,13 @@ val/(train+val) ≈ 1.0%; `index.json` totals match the sum of file sizes on dis
 **Done when:** `index.json` exists, totals are within ~10% of 2.19B, and the
 byte-size invariant holds for every shard.
 
-**ACTUAL (2026-09-22):** DONE. **2,039,072,768 train tokens** (1,991,282 windows)
+**v2 REBUILD (2026-10-03, current):** document-level split approved and run. Each
+document goes wholly to val when `blake2b(text) % 100 == 0`. **2,040,088,576 train +
+19,577,856 val tokens**; 6,638 val docs (0.991%); 663,486 + 6,638 = 670,124 docs =
+corpus exactly; 0 alignment violations; BPB factor 0.308978; 15,564 steps.
+`modal_app.py` (+55/−20) and `config.py` (`VAL_ONE_IN_N_DOCS`) changed accordingly.
+
+**v1 (2026-09-22, superseded):** DONE. **2,039,072,768 train tokens** (1,991,282 windows)
 + **20,601,856 val** (20,119 windows), val fraction exactly 1.000%, 0 window-alignment
 violations, 14/14 shards present. Realized mix case-law 35.1% / sec 42.2% /
 fineweb-edu 22.8% (77.3% legal). Came in 7% under the guide's 2.19B: SEC and
@@ -218,12 +224,12 @@ gate report and the 3-step execution plan: `docs/05-pretrain.md`.
 **Approved parameters (2026-10-03):** 4 epochs, `--max-usd 50`, 8 × H100,
 HF repo `mdeepanshu/slm-125m-base`.
 
-**Run size:** 4 × 2,039,072,768 = **8.156B tokens seen**, **15,556 optimizer steps**
+**Run size:** 4 × 2,040,088,576 = **8.160B tokens seen**, **15,564 optimizer steps**
 at 524,288 tokens/step, **381 warmup steps**, 64.8 tokens/param. One continuous
-cosine schedule over all 15,556 steps — never restarted.
+cosine schedule over all 15,564 steps — never restarted.
 
 **Cost:** ≈ **$7.86 / MFU** (4 epochs, incl. 1.15 overhead). At the reference repo's
-measured 16.2% MFU that is **$48.49 — a 3% margin under the $50 cap**; the run
+measured 16.2% MFU that is **$48.52 — a 3% margin under the $50 cap**; the run
 needs MFU ≥ 15.7% to fit. The calibration step exists to measure this before the
 full run is launched.
 
@@ -284,7 +290,7 @@ completes a prompt end to end from a cold start.
 | `config.py` | 0, **amended 5** | verbatim §5.1 through Phase 4; **amended for Phase 5** (see below) |
 | `cleaning.py` | 0 | **YES — verbatim §5.2** |
 | `dedup.py` | 0 | **YES — verbatim §5.3** |
-| `modal_app.py` | 0 | **YES — verbatim §5.4** |
+| `modal_app.py` | 0, **amended 4-v2** | verbatim §5.4 through Phase 4 v1; `tokenize_shard` changed to a document-level split (v2) |
 | `.gitignore` | 0 | no |
 | `docs/MASTER_PLAN.md` | 0 | no |
 | `docs/00-setup.md` … `docs/06-deploy.md` | per phase | no |
@@ -433,10 +439,11 @@ Each worker calls `volume.commit()` before returning.
 
 ## 8. Definition of done (whole project)
 
-1. `/data/tokens/index.json` reports **2.039B train tokens and 20.6M val tokens** in
-   `uint16` 1024-token windows, from a corpus that is 35/42/23 case-law/SEC/web
-   (77.3% legal). ✅ ACHIEVED — see `docs/04-tokenize.md` for why the total is 7%
-   under the guide's 2.19B projection (tokenizer efficiency, not data loss).
+1. `/data/tokens/index.json` reports **2.040B train tokens and 19.6M val tokens** in
+   `uint16` 1024-token windows with a **document-level** 99/1 split, from a corpus that
+   is 35/42/23 case-law/SEC/web (77.3% legal). ✅ ACHIEVED — see `docs/04-tokenize.md`
+   for why the total is 7% under the guide's 2.19B projection (tokenizer efficiency,
+   not data loss) and for the v2 split rebuild.
 2. `/data/tokenizer/` holds a 16,384-token byte-level BPE that round-trips.
 3. A 125,848,320-parameter Llama-style model has been pretrained to convergence
    under the approved budget, with a monotone-ish loss curve and a reported
@@ -468,3 +475,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-09-22 | 4 | DONE. 2.039B train + 20.6M val tokens, 1.000% val split, 0 alignment violations. 7% under the guide's projection — investigated and attributed to tokenizer efficiency on case-law (verified with `verify_tokens.py`). |
 | 2026-09-22 | 5 | ⛔ STOPPED AT GPU APPROVAL GATE. Gate report in `docs/05-pretrain.md`. Phases 0-4 total spend: $0.00. |
 | 2026-10-03 | 5 | Plan revised: **4 epochs, $50 cap, 8×H100, HF `mdeepanshu/slm-125m-base`**. config.py amended (exact `approx_params()` = 125,848,320; `pretrain_steps()` = 15,556; GPU rates verified at $0.001097/s). `verify_model.py` preflight: ALL INVARIANTS HOLD; `<|bos|>` occurs 0× in 2.06B packed tokens → prompts use `<|eos|>`; BPB = loss × 0.309145. Cost ≈ $7.855/MFU → $48.49 at the reference 16.2% MFU (3% margin). Recommended perf stack: SDPA + fused AdamW + TF32, torch.compile A/B in calibration. Recommended doc-level val split (awaiting yes/no). |
+| 2026-10-03 | 4 | **v2 rebuild — document-level val split** (approved). 2,040,088,576 train + 19,577,856 val tokens, 6,638 val docs (0.991%), every doc on exactly one side. Both verifiers pass; BPB factor 0.308978; steps 15,564; 4-epoch cost $48.52 @ 16.2% MFU. |

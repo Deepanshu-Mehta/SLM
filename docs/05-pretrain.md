@@ -19,7 +19,8 @@ so every number below is derived from measured artifacts, not assumptions.
 
 ## 1. Preflight — verified
 
-`verify_model.py`, run `ap-kln3YfqkknDnP9BaFJTS9V`, exits non-zero on any violation.
+`verify_model.py`, run `ap-332ROS5YsJCefQATzAq5S1` (against the v2 document-split data),
+exits non-zero on any violation.
 Result: **ALL INVARIANTS HOLD.**
 
 | Invariant | Measured |
@@ -29,20 +30,21 @@ Result: **ALL INVARIANTS HOLD.**
 | Embeddings tied | True |
 | Master weight dtype | `torch.float32` |
 | Token ids (tokenizer = `model.py`) | bos 0 · eos 1 · pad 2 · unk 3 — all match |
-| `<\|bos\|>` occurrences in packed data | **0** across all 2,059,674,624 tokens |
-| `<\|eos\|>` occurrences | 663,297 train + 6,810 val = 670,107 (≈ the 670,124 corpus docs) |
-| Val bytes/token (`skip_special_tokens=True`) | **4.666731** (case-law 4.485 · sec 5.027 · fineweb 4.279) |
+| `<\|bos\|>` occurrences in packed data | **0** across all 2,059,666,432 tokens |
+| `<\|eos\|>` occurrences | 663,469 train + 6,622 val (vs 663,486 / 6,638 docs; the rest sit in discarded tail buffers) |
+| Val bytes/token (`skip_special_tokens=True`) | **4.669241** (case-law 4.480 · sec 5.044 · fineweb 4.293) |
+| Val split | **document-level** — 6,638 whole documents (0.991%), 19,577,856 tokens |
 
 ## 2. Run size
 
 | | Value |
 |---|---|
-| Train tokens per epoch | 2,039,072,768 (from `/data/tokens/index.json`) |
-| Tokens seen (4 epochs) | **8,156,291,072** |
+| Train tokens per epoch | 2,040,088,576 (from `/data/tokens/index.json`, v2 document split) |
+| Tokens seen (4 epochs) | **8,160,354,304** |
 | Global batch | 524,288 tokens = 32 seq × 1024 × 8 GPUs × **2 grad-accum** |
-| Optimizer steps | **15,556** — `config.pretrain_steps()`, derived from the index |
+| Optimizer steps | **15,564** — `config.pretrain_steps()`, derived from the index |
 | Warmup | 200M tokens = **381 steps** (2.4% of the run) |
-| LR | 6e-4 peak → 6e-5 floor, cosine over all 15,556 steps |
+| LR | 6e-4 peak → 6e-5 floor, cosine over all 15,564 steps |
 | Tokens / parameter | **64.8** (Chinchilla-optimal is ~20) |
 
 Training length comes from one place: `PRETRAIN_EPOCHS × train_tokens` via
@@ -56,26 +58,26 @@ but it makes an honest validation set more important, not less (see §11).
 
 ## 3. Cost — read this before approving
 
-Training FLOPs ≈ `6 × N × D` = 6 × 125,848,320 × 8,156,291,072 = **6.159 × 10¹⁸**.
+Training FLOPs ≈ `6 × N × D` = 6 × 125,848,320 × 8,160,354,304 = **6.162 × 10¹⁸**.
 Because GPU-seconds = FLOPs ÷ (MFU × per-GPU peak), **total cost depends only on
 MFU, not on GPU count** — more GPUs buy wall-clock, not savings:
 
 ```
-cost(4 epochs) ≈ $7.855 / MFU      (H100 $0.001097/GPU-s, × 1.15 CPU/memory overhead)
+cost(4 epochs) ≈ $7.860 / MFU      (H100 $0.001097/GPU-s, × 1.15 CPU/memory overhead)
 ```
 
 | MFU | Cost | Wall-clock on 8×H100 | vs $50 cap |
 |---|---|---|---|
-| 10% | $78.56 | 130 min | ❌ over |
-| 15% | $52.37 | 87 min | ❌ over |
+| 10% | $78.60 | 130 min | ❌ over |
+| 15% | $52.40 | 87 min | ❌ over |
 | **15.7%** | **$50.00** | 83 min | **break-even** |
-| **16.2%** *(reference repo, measured)* | **$48.49** | 80 min | ⚠️ **3% margin** |
-| 20% | $39.28 | 65 min | ✅ 21% margin |
-| 25% | $31.42 | 52 min | ✅ |
-| 30% | $26.19 | 43 min | ✅ |
+| **16.2%** *(reference repo, measured)* | **$48.52** | 80 min | ⚠️ **3% margin** |
+| 20% | $39.30 | 65 min | ✅ 21% margin |
+| 25% | $31.44 | 52 min | ✅ |
+| 30% | $26.20 | 43 min | ✅ |
 
 **The honest read:** at the only *measured* MFU we have (16.2%, from the reference
-repo), 4 epochs fits under $50 with a 3% margin. A 1-point MFU shortfall pushes it
+repo), 4 epochs fits under $50 with a 3% margin ($48.52). A 1-point MFU shortfall pushes it
 over and the budget guard would stop the run partway through. **The run is
 affordable only if throughput is at or above the reference** — which is why the
 performance stack (§4) and the calibration step (§10) decide this phase.
@@ -106,10 +108,10 @@ Where the FLOPs go, per layer, forward, seq 1024:
 
   | Gain over 16.2% | MFU | 4-epoch cost | Margin under $50 |
   |---|---|---|---|
-  | 1.0× (no gain) | 16.2% | $48.49 | 3% |
-  | 1.2× | 19.4% | $40.41 | 19% |
-  | **1.3×** | **21.1%** | **$37.30** | **25%** |
-  | 1.5× | 24.3% | $32.33 | 35% |
+  | 1.0× (no gain) | 16.2% | $48.52 | 3% |
+  | 1.2× | 19.4% | $40.43 | 19% |
+  | **1.3×** | **21.1%** | **$37.32** | **25%** |
+  | 1.5× | 24.3% | $32.35 | 35% |
 
   Its risks — 1–3 minutes of compile time, and occasional recompiles on resume —
   are exactly what the < $1 calibration can expose before any real money is spent.
@@ -150,12 +152,12 @@ Logged every 20 steps; evaluated on the full val split every 1,000 steps.
 |---|---|---|
 | loss | mean token cross-entropy, nats | the optimised quantity |
 | perplexity | `exp(loss)` | conventional, but **tokenizer-dependent** |
-| **bits-per-byte** | `loss × 0.309145` | `loss / (ln 2 × 4.666731)` — **tokenizer-independent**, comparable to models with any vocabulary |
+| **bits-per-byte** | `loss × 0.308978` | `loss / (ln 2 × 4.669241)` — **tokenizer-independent**, comparable to models with any vocabulary |
 | tokens/sec, MFU | `6 × N × tok/s ÷ (n_gpus × 989e12)` | the cost driver |
 | spend, projected spend | `config.projected_cost_usd()` | budget guard |
 
-The 4.666731 constant is the measured val-split ratio. If the val split is rebuilt
-(§11), it must be re-measured — `verify_model.py` does that.
+The 4.669241 constant is the measured ratio of the v2 (document-level) val split.
+If the val split is ever rebuilt, it must be re-measured — `verify_model.py` does that.
 
 ## 8. Checkpoint, resume and schedule continuity
 
@@ -218,7 +220,7 @@ exist only on GPU. Those are first exercised in Step 2.
 
 ### Step 3 — Full 4-epoch pretraining · 8 × H100 on Modal · **~$37–48**
 
-- **15,556 steps**, 8.156B tokens, one cosine schedule over the whole run.
+- **15,564 steps**, 8.160B tokens, one cosine schedule over the whole run.
 - `--max-usd 50` with the live guard from §9, so the real 8-GPU throughput is
   checked within the first minutes — if it does not fit, it stops early,
   checkpointed, not at $49.
@@ -226,7 +228,11 @@ exist only on GPU. Those are first exercised in Step 2.
 - On completion: write HF `base/`, run final val eval, and generate samples from a
   legal and a financial prefix, each prompted with `<|eos|>`.
 
-## 11. Open decision — document-level validation split (recommended)
+## 11. Document-level validation split — ✅ APPROVED AND DONE (2026-10-03)
+
+**Resolution:** Phase 4 was rebuilt with a document-level split (`docs/04-tokenize.md`, v2).
+6,638 whole documents (0.991%) are held out; every document is on exactly one side.
+All numbers in this doc refer to the v2 data. The original reasoning is kept below.
 
 Phase 4 sends every 100th **window** to val. Documents span windows, so the rest of
 each val document is in training:
@@ -289,7 +295,7 @@ replaces the recorded Phase 4 artefacts — so it needs an explicit yes.
 - **Step 2** (< $1, 1 × H100) — needs explicit approval.
 - **Step 3** (~$37–48, 8 × H100, `--max-usd 50`) — needs explicit approval *after*
   Step 2's measured MFU is reported against the decision rule in §10.
-- **§11** document-level split — needs a yes or no.
+- ~~§11 document-level split~~ — **approved and done** 2026-10-03.
 
 ## Results
 

@@ -127,7 +127,8 @@ class CleanConfig:
 CLEAN = CleanConfig()
 
 SEQ_LEN: int = 1_024
-VAL_EVERY_N_WINDOWS: int = 100          # every 100th window -> val (99/1 split)
+VAL_ONE_IN_N_DOCS: int = 100            # a document goes wholly to val when
+                                        # blake2b(text) % 100 == 0 (99/1 by document)
 TOKENS_DTYPE: str = "uint16"
 
 

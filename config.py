@@ -7,7 +7,8 @@ from typing import Mapping
 
 # Project identity / paths (all paths are relative to the Modal Volume mount).
 PROJECT = "slm-125m"
-HF_REPO = "mdeepanshu/slm-125m-base"  # Phase 6 push target
+HF_REPO = "Deepanshu027/slm-125m-base"  # Phase 6 push target (the HF account the write token belongs to)
+HF_SPACE = "Deepanshu027/slm-125m-api"  # public inference API (Docker Space, free CPU)
 
 VOLUME_NAME = "slm-125m"
 DATA_ROOT = "/data"

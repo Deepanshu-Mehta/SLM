@@ -40,7 +40,7 @@ Result: **ALL INVARIANTS HOLD.**
 | | Value |
 |---|---|
 | Train tokens per epoch | 2,040,088,576 (from `/data/tokens/index.json`, v2 document split) |
-| Tokens seen (4 epochs) | **8,160,354,304** |
+| Tokens seen (4 epochs) | **8,160,018,432** (15,564 × 524,288; the 328 windows left after the last full step are unused) |
 | Global batch | 524,288 tokens = 32 seq × 1024 × 8 GPUs × **2 grad-accum** |
 | Optimizer steps | **15,564** — `config.pretrain_steps()`, derived from the index |
 | Warmup | 200M tokens = **381 steps** (2.4% of the run) |

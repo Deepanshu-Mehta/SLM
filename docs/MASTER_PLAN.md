@@ -11,7 +11,7 @@ Last updated: 2026-10-03
 | 3 | Train 16K byte-level BPE tokenizer | CPU ×1 (8 vCPU) | ~$0 | **DONE** |
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
 | 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **≤ $25.32 actual** of $50 cap | **DONE** — val 2.127 / ppl 8.39 / **0.657 bits/byte** |
-| 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 | PENDING |
+| 6 | Deploy (HF repo + inference API + web frontend) | CPU | $0 so far | model ✅ published · API ⛔ hosting decision · website 📋 planned |
 
 ---
 
@@ -485,3 +485,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-03 | 5 | **Step 2 DONE (≤ $0.59, 1×H100, 7m46s).** Eager 15.2% MFU → 4 epochs $51.67 (over cap); **torch.compile 32.4% MFU (2.13×) → $24.28**, numerically identical losses. CUDA resume, bf16 autocast, fused AdamW, NCCL, export all exercised; no warnings. Verdict PROCEED. Step 3 projection ~$30–39 at `--max-usd 49`; awaiting approval. |
 | 2026-10-03 | 5 | Final pre-launch review: pyflakes clean, Volume clean, collectives rank-consistent; budget-stop branch exercised locally (checkpoints then exits 3, ledger persists across launches). Fixed host resources for 8 ranks (cpu 16, 96 GiB, 4 compile threads/rank). **Step 3 approved and launched**: 8×H100, `--max-usd 49 --compile`. |
 | 2026-10-03 | 5 | **DONE.** 8×H100, 15,564 steps, 44.9 min, **≤ $24.78** (Phase 5 total ≤ $25.32 of $50). 3.36M tok/s, 32.1% MFU, ~99% scaling. Final held-out val **2.1269 / ppl 8.39 / 0.6572 bits/byte**, improving at all 16 evals; per-epoch gains halve each pass. Artifact verified independently; missing `architectures` in config.json fixed in code and on the Volume. Next: Phase 6 (deploy). |
+| 2026-10-03 | 6 | Model published: **Deepanshu027/slm-125m-base** (public; the `mdeepanshu` namespace does not exist, and the token is Deepanshu027's). Weights hash-verified from the Hub. FastAPI server written and tested locally. HF Docker Space **blocked by 402**: free Docker Spaces now need PRO. Website plan written (`docs/07-website-plan.md`). No Modal resources running. |

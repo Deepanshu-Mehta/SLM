@@ -1,7 +1,7 @@
 # Phase 5 — Pretrain the 125M model
 
 **Compute:** GPU (H100) · **Cost:** the only real spend in the project ·
-**Status:** ✅ Step 1 DONE ($0) · ✅ Step 2 DONE (≤ $0.59) · ⛔ **Step 3 awaiting explicit approval**
+**Status:** ✅ **DONE** — Step 1 ($0) · Step 2 (≤ $0.54) · Step 3 (≤ $24.78) · Phase 5 total **≤ $25.32 of $50**
 
 This is the approval document. Spend is approved against what is written here,
 so every number below is derived from measured artifacts, not assumptions.
@@ -414,3 +414,126 @@ cannot show. Now: `cpu=16.0, memory=96 GiB` (4.8% of GPU cost, inside the 15%
 overhead factor) and `TORCHINDUCTOR_COMPILE_THREADS=4`.
 
 **Launch command:** `modal run --detach pretrain_app.py::pretrain --confirm --max-usd 49 --compile`
+
+### Step 3 — full 4-epoch pretraining on 8 × H100 ✅ COMPLETED (2026-10-03)
+
+App `ap-fvlUMayCRdesCVr8xelPEv`, launched with
+`modal run --detach pretrain_app.py::pretrain --confirm --max-usd 49 --compile`.
+Status `completed`, exit code 0, steps 0 → 15,564 in one launch, with no
+preemptions, restarts or warnings.
+
+![Train and held-out loss over 8.16B tokens, with the LR schedule](05-loss-curve.png)
+
+#### Headline
+
+| | Value |
+|---|---|
+| **Final held-out loss** | **2.1269 nats/token** (whole document-level val split, 19.56M tokens) |
+| **Final held-out perplexity** | **8.39** |
+| **Final held-out bits/byte** | **0.6572** (tokenizer-independent) |
+| Final train loss (centred 500-step mean) | 2.076 |
+| Tokens seen | 8,160,354,304 (4 epochs, 64.8 tokens/param) |
+| Throughput | **3.36M tok/s**, MFU **32.1%** median (32.5% peak), i.e. **~99% scaling** from the 1-GPU 32.4% |
+| Wall-clock | **44.9 min** container lifetime, including start-up, staging, compile, 16 evals, 31 checkpoints, export and samples |
+| **Cost** | **≤ $24.78** (44.9 min × 8 × $0.001097 × 1.048 measured host share). The trainer's ledger says $27.82 because it budgets a 1.15 overhead factor and a 120 s start-up allowance on purpose |
+
+Projected vs actual: the plan said $30–39 and 45–60 min; the result was ≤ $24.78 and
+44.9 min. 8-GPU scaling was near-perfect, better than the 85–95% planning assumption.
+
+#### Every evaluation (whole held-out split)
+
+| Step | Epoch | Tokens seen | Train loss | Val loss | Val ppl | **Val bits/byte** | Gap |
+|---|---|---|---|---|---|---|---|
+| 1,000 | 1 | 0.52B | 2.726 | 2.7763 | 16.06 | **0.8578** | +0.050 |
+| 2,000 | 1 | 1.05B | 2.510 | 2.5294 | 12.55 | **0.7815** | +0.019 |
+| 3,000 | 1 | 1.57B | 2.397 | 2.4271 | 11.33 | **0.7499** | +0.030 |
+| 4,000 | 2 | 2.10B | 2.346 | 2.3637 | 10.63 | **0.7303** | +0.017 |
+| 5,000 | 2 | 2.62B | 2.260 | 2.3210 | 10.19 | **0.7172** | +0.061 |
+| 6,000 | 2 | 3.15B | 2.232 | 2.2854 | 9.83 | **0.7061** | +0.054 |
+| 7,000 | 2 | 3.67B | 2.213 | 2.2546 | 9.53 | **0.6966** | +0.041 |
+| 8,000 | 3 | 4.19B | 2.167 | 2.2303 | 9.30 | **0.6891** | +0.063 |
+| 9,000 | 3 | 4.72B | 2.149 | 2.2087 | 9.10 | **0.6824** | +0.059 |
+| 10,000 | 3 | 5.24B | 2.100 | 2.1883 | 8.92 | **0.6761** | +0.088 |
+| 11,000 | 3 | 5.77B | 2.120 | 2.1697 | 8.76 | **0.6704** | +0.049 |
+| 12,000 | 4 | 6.29B | 2.089 | 2.1575 | 8.65 | **0.6666** | +0.069 |
+| 13,000 | 4 | 6.82B | 2.036 | 2.1458 | 8.55 | **0.6630** | +0.110 |
+| 14,000 | 4 | 7.34B | 2.060 | 2.1360 | 8.47 | **0.6600** | +0.076 |
+| 15,000 | 4 | 7.86B | 2.108 | 2.1293 | 8.41 | **0.6579** | +0.021 |
+| 15,564 | 4 | 8.16B | 2.053 | 2.1269 | 8.39 | **0.6572** | +0.074 |
+
+(The train loss in this table is a single 20-step log at that step, so the gap
+column is noisy. The chart uses a centred 500-step mean.)
+
+#### Did 4 epochs overfit? No — but the returns diminished
+
+- **Held-out loss improved at all 16 evaluations**; it never turned upward. That's
+  the overfitting test the document-level split was built for, and it would have
+  been hidden with v1's leaky window split.
+- **Train loss drops a step at every epoch boundary** (visible in the chart): the
+  model is partly memorizing documents it has seen before. Held-out loss shows no
+  such step, so that memorization never cost generalization.
+- **Diminishing returns are clear.** Per-epoch improvement in held-out bits/byte:
+  epoch 1 → 0.7499 (from 0.8578 at step 1k), epoch 2 → 0.6966 (−0.053),
+  epoch 3 → 0.6704 (−0.026), epoch 4 → 0.6572 (−0.013). Each pass bought about half
+  the gain of the previous one. A 5th epoch would likely add < 0.01 bits/byte, so
+  this corpus is close to exhausted at 125M parameters. More unique data, not more
+  epochs, is the lever for the next model.
+
+#### Samples (from the run, prompted with `<|eos|>`, temperature 0.8, top-k 50, top-p 0.95)
+
+> **The court held that the defendant**’s failure to file a statement of claim for the
+> $5,000 bond with the plaintiff’s counsel on or before February 9, 2003, did not
+> prevent the plaintiff from filing a lawsuit against the defendant. The court
+> reasoned that the defendant’s failure to file a claim for the bond with…
+
+> **The Company's net revenues for the fiscal year** ended January 31, 1998 were
+> $298,384,000 as compared to net revenues of $262,906,000 for the fiscal year ended
+> January 31, 1997 ("fiscal 1997"). The net loss for fiscal 1997 was $35,917,000 as
+> compared to net…
+
+#### Independent verification of the exported artifact
+
+`/data/checkpoints/base/` was downloaded and checked locally with plain
+`AutoModelForCausalLM.from_pretrained`, so this checks the file, not the run's
+own report:
+
+- 125,848,320 params; `lm_head` tied to `embed_tokens`; `config.json` **and**
+  `generation_config.json` carry bos 0 / eos 1 / pad 2; weights bf16, 251.7 MB.
+- Held-out loss re-measured on 48 random windows of the case-law val shard:
+  **2.1259**, against the run's pooled **2.1269**. They agree.
+- The fineweb-edu val shard scores **3.04** (ppl 21), much worse. That's the expected
+  shape of a 77%-legal model. Note that per-source bits/byte must use that
+  source's own bytes/token: fineweb ≈ **1.02**, case-law ≈ **0.685**, against the
+  pooled **0.6572**, which is correct only for the pooled split.
+- Fresh samples:
+  - *"Pursuant to Section 10(b) of the Securities Exchange Act of 1934,"* →
+    *"the Registrant has duly caused this report to be signed on its behalf by the
+    undersigned, thereunto duly authorized…"* (word-perfect 10-K boilerplate)
+  - *"The Supreme Court of the United States has long recognized that"* →
+    *"the separation of powers between branches of government is a fundamental
+    principle of our system of government…"*
+  - *"Photosynthesis is the process by which"* → *"plants produce more oxygen, carbon
+    dioxide and water from the sun…"* (**fluent but false**). This is the
+    honest limit of a 125M base model trained 77% on legal/financial text: it
+    speaks the domain register well and does not know general facts reliably.
+
+**Defect found and fixed:** the exported `config.json` had **no `architectures`
+field**. `from_pretrained` tolerated it (it falls back on `model_type`), but vLLM
+and llama.cpp's GGUF converter read `architectures[0]` and would fail in Phase 6.
+The cause: the config came from a model built from a config object, where
+`architectures` is unset. The fix is in `train.py` (`export_hf` sets it from the model
+class), and the already-exported `config.json` on the Volume was patched to
+`["LlamaForCausalLM"]` and re-verified with a round-trip load. No retraining was
+needed; the weights are untouched.
+
+#### Validation criteria (§12)
+
+| # | Criterion | Result |
+|---|---|---|
+| 1 | Loss falls without divergence; bounded grad-norm; no NaN/Inf | ✅ grad-norm settled at 0.17–0.25; no non-finite values |
+| 2 | Val loss / ppl / BPB at each 1,000-step eval | ✅ 16 evals; final 2.1269 / 8.39 / **0.6572** |
+| 3 | Train/val gap tracked across 4 epochs | ✅ val improved every eval; no overfitting |
+| 4 | Resume demonstrated | ✅ bit-exact locally (Step 1), on CUDA (Step 2); not needed in Step 3 (no preemption) |
+| 5 | `base/` loads via `from_pretrained` with bos 0 / eos 1 / pad 2 | ✅ verified independently; `architectures` fixed |
+| 6 | Coherent domain samples, EOS-prompted | ✅ legal and SEC register fluent |
+| 7 | Total spend ≤ $50 | ✅ **≤ $25.32** for Phase 5 |

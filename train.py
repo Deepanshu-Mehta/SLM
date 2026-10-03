@@ -277,6 +277,7 @@ def export_hf(raw: torch.nn.Module, out_dir: Path, tokenizer_dir: str) -> None:
     save_file(weights, str(out_dir / "model.safetensors"), metadata={"format": "pt"})
 
     cfg = copy.deepcopy(raw.config)
+    cfg.architectures = [type(raw).__name__]  # unset on config-built models; vLLM/llama.cpp need it
     cfg.torch_dtype = "bfloat16"
     cfg.use_cache = True
     cfg.bos_token_id, cfg.eos_token_id, cfg.pad_token_id = (

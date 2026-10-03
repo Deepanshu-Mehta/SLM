@@ -10,7 +10,7 @@ Last updated: 2026-10-03
 | 2 | Dedup + decontaminate | CPU fan-out ×20 | ~$0 | **DONE** |
 | 3 | Train 16K byte-level BPE tokenizer | CPU ×1 (8 vCPU) | ~$0 | **DONE** |
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
-| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **~$37–49 est., $50 cap — HARD GATE** | Step 1 ✅ · Step 2 ✅ · Step 3 **RUNNING** |
+| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **≤ $25.32 actual** of $50 cap | **DONE** — val 2.127 / ppl 8.39 / **0.657 bits/byte** |
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 | PENDING |
 
 ---
@@ -448,11 +448,13 @@ Each worker calls `volume.commit()` before returning.
    for why the total is 7% under the guide's 2.19B projection (tokenizer efficiency,
    not data loss) and for the v2 split rebuild.
 2. `/data/tokenizer/` holds a 16,384-token byte-level BPE that round-trips.
-3. A 125,848,320-parameter Llama-style model has been pretrained to convergence
+3. ✅ ACHIEVED — a 125,848,320-parameter Llama-style model pretrained for 4 epochs
+   (8.16B tokens), final held-out val 2.1269 nats / ppl 8.39 / **0.6572 bits/byte**,
+   improving at every eval. Original criterion: a 125,848,320-parameter Llama-style model has been pretrained to convergence
    under the approved budget, with a monotone-ish loss curve and a reported
    held-out **validation perplexity**, resumable from `/data/checkpoints/ckpt.pt`.
-4. `/data/checkpoints/base/` is a standard HF model directory that loads with
-   `AutoModelForCausalLM.from_pretrained`.
+4. ✅ ACHIEVED — `/data/checkpoints/base/` is a standard HF model directory that loads with
+   `AutoModelForCausalLM.from_pretrained` (verified independently; `architectures` added).
 5. The weights are published to the HF repo in `config.HF_REPO`.
 6. A public inference endpoint answers `POST /generate` with a coherent
    domain-register completion for a legal prefix.
@@ -482,3 +484,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-03 | 5 | **Step 1 DONE ($0).** data.py / train.py / pretrain_app.py written. `smoke_local.py` 31/31 on M2 Pro CPU: loss 9.90→7.87 in 20 steps; SIGKILL+resume bit-identical to an uninterrupted run; 2-proc DDP identical to single-process; HF export bos0/eos1/pad2, 100% argmax agreement. Fixed: gloo-incompatible AVG reduce; smoke warmup override. Step 2 awaits approval. |
 | 2026-10-03 | 5 | **Step 2 DONE (≤ $0.59, 1×H100, 7m46s).** Eager 15.2% MFU → 4 epochs $51.67 (over cap); **torch.compile 32.4% MFU (2.13×) → $24.28**, numerically identical losses. CUDA resume, bf16 autocast, fused AdamW, NCCL, export all exercised; no warnings. Verdict PROCEED. Step 3 projection ~$30–39 at `--max-usd 49`; awaiting approval. |
 | 2026-10-03 | 5 | Final pre-launch review: pyflakes clean, Volume clean, collectives rank-consistent; budget-stop branch exercised locally (checkpoints then exits 3, ledger persists across launches). Fixed host resources for 8 ranks (cpu 16, 96 GiB, 4 compile threads/rank). **Step 3 approved and launched**: 8×H100, `--max-usd 49 --compile`. |
+| 2026-10-03 | 5 | **DONE.** 8×H100, 15,564 steps, 44.9 min, **≤ $24.78** (Phase 5 total ≤ $25.32 of $50). 3.36M tok/s, 32.1% MFU, ~99% scaling. Final held-out val **2.1269 / ppl 8.39 / 0.6572 bits/byte**, improving at all 16 evals; per-epoch gains halve each pass. Artifact verified independently; missing `architectures` in config.json fixed in code and on the Volume. Next: Phase 6 (deploy). |

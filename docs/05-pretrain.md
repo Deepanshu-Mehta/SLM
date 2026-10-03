@@ -1,7 +1,7 @@
 # Phase 5 — Pretrain the 125M model
 
 **Compute:** GPU (H100) · **Cost:** the only real spend in the project ·
-**Status:** ✅ Step 1 DONE (local, $0) · ⛔ **Step 2 awaiting explicit approval**
+**Status:** ✅ Step 1 DONE ($0) · ✅ Step 2 DONE (≤ $0.59) · ⛔ **Step 3 awaiting explicit approval**
 
 This is the approval document. Spend is approved against what is written here,
 so every number below is derived from measured artifacts, not assumptions.
@@ -333,3 +333,62 @@ proves the generation path works.
 - Warmup is derived as 200M tokens ÷ batch size, which at the 2,048-token smoke
   batch is 97,656 steps, so the LR would never have left ~1e-8. Added
   `--warmup-steps` (default 0 = derived), so the real run is unchanged at 381.
+
+### Step 2 — calibration on 1 × H100 ✅ PASSED (2026-10-03, ≤ $0.59)
+
+App `ap-dLOwu1cjUEPeqepSG0vaVy`, one container, three sequential torchrun launches.
+The app was up for 7 min 46 s (15:07:36 → 15:15:22 IST), which bounds the cost at
+466 s × $0.001097 × 1.15 = **≤ $0.59**. Modal's billing report had not caught up
+yet (0 rows). The trainer's own ledger says $1.04, because it charges a 120 s
+startup allowance on each of the 3 launches even though they shared one warm
+container. It errs high on purpose.
+
+| Run | Steps | tok/s | **MFU** | 4-epoch cost at this MFU | Val loss / BPB @ 50 |
+|---|---|---|---|---|---|
+| eager | 0 → 30 | 199,615 | 15.2% | **$51.67** ❌ over cap | — |
+| eager, **resumed** | 30 → 50 | 199,319 | 15.2% | — | 7.4970 / 2.3164 |
+| **`torch.compile`** | 0 → 50 | **424,826** | **32.4%** | **$24.28** ✅ | 7.4969 / 2.3164 |
+
+**What this settles**
+
+- **`torch.compile` is required, not optional.** Eager mode measured 15.2% MFU,
+  essentially the reference repo's 16.2%, which would put 4 epochs at $51.67 and
+  over the cap. Compile gives **2.13× the throughput** and brings 4 epochs to $24.28.
+  This confirms the §4 analysis: in a model this narrow, the small unfused ops
+  around the matmuls were the bottleneck.
+- **Compile does not change the model.** Train loss is identical to 4 decimals at
+  every logged step (9.7311, 9.2586, 8.5294, 8.2398, 7.8830, 7.5506 at steps
+  5/10/20/30/40/50), and val loss differs by 0.0001.
+- **Resume works on CUDA**, including fused-AdamW optimizer state. The eager run,
+  stopped at 30 and resumed, logged step-40/50 losses (7.8830, 7.5506) identical to
+  the uninterrupted compiled run. LR at step 40 was 6.30e-5 = 6e-4 × 40/381, still
+  on the original warmup ramp.
+- **All CUDA-only paths are now exercised:** bf16 autocast, fused AdamW, NCCL
+  under torchrun, compile on CUDA, HF export, sample generation. No warnings,
+  recompiles, graph breaks or non-finite values anywhere in the log.
+- **Overheads measured:** staging the 4 GB of tokens to local disk took 20 s;
+  checkpoint saves took 2.9–5.6 s.
+- Samples at 50 steps are still word salad (*"of the the the of the…"*), as expected.
+
+**Decision rule (§10):** 1-GPU projection $24.28 ≤ $42 → **PROCEED** to Step 3,
+subject to approval.
+
+### Projection for Step 3 (8 × H100, compiled)
+
+Single-GPU MFU is an upper bound for 8 GPUs. Here the per-step gradient all-reduce
+(~503 MB of fp32 grads over NVLink) takes a few milliseconds, against roughly 155 ms
+of compute per GPU per step, so scaling losses should be small. Planning range:
+
+| 8-GPU scaling efficiency | MFU | Training cost | + fixed overhead* | **Total** | Wall-clock |
+|---|---|---|---|---|---|
+| 95% | 30.8% | $25.6 | ~$4 | **~$30** | ~45 min |
+| 85% | 27.5% | $28.6 | ~$4 | **~$33** | ~50 min |
+| 70% (pessimistic) | 22.7% | $34.7 | ~$4 | **~$39** | ~60 min |
+
+\*Fixed overhead: container start, token staging, compile (~1 min), 31 checkpoints
+at ~4 s each, 16 full-val evals, final export and samples.
+
+**Cap for Step 3:** `--max-usd 49`, i.e. $50 minus Step 2's ≤ $0.59, rounded down,
+so Phase 5 as a whole stays under the approved $50. The live guard re-projects from
+real 8-GPU throughput after 20 steps; if 8-GPU MFU unexpectedly fell below ~16%, it
+would checkpoint and stop within the first few dollars.

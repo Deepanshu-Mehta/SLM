@@ -88,8 +88,6 @@ def verify() -> dict:
 
 @app.local_entrypoint()
 def check():
-    import json
-
     r = verify.remote()
 
     print("\n=== 1. WINDOW ALIGNMENT (every .bin must be a multiple of 2048 bytes) ===")

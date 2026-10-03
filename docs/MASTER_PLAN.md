@@ -222,7 +222,7 @@ fan-out. See `docs/04-tokenize.md`.
 gate report and the 3-step execution plan: `docs/05-pretrain.md`.
 
 **Approved parameters (2026-10-03):** 4 epochs, `--max-usd 50`, 8 × H100,
-HF repo `mdeepanshu/slm-125m-base`.
+HF repo `Deepanshu027/slm-125m-base` (requested as `mdeepanshu/…`, a namespace that does not exist on HF).
 
 **Run size:** 4 × 2,040,088,576 = **8.160B tokens seen**, **15,564 optimizer steps**
 at 524,288 tokens/step, **381 warmup steps**, 64.8 tokens/param. One continuous
@@ -317,7 +317,7 @@ Phases 0–4 ran against the unmodified version):
 | `GPU_RATE_PER_SEC`, `COST_OVERHEAD_FACTOR = 1.15` | live spend projection for the `--max-usd` guard |
 | `pretrain_steps()`, `projected_cost_usd()` | the one place step count and cost are derived |
 | `TARGET_TOKENS` commented as a Chinchilla *reference* | removes a second definition of training length |
-| `HF_REPO = "mdeepanshu/slm-125m-base"` | Phase 6 push target |
+| `HF_REPO = "Deepanshu027/slm-125m-base"`, `API_URL`, `SITE_URL` | Phase 6 targets: the live model repo, API and website |
 
 ---
 

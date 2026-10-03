@@ -2,7 +2,7 @@
 
     python publish_hf.py stats  <model_dir>          # write training_stats.json + README.md
     python publish_hf.py model  <model_dir>          # upload to config.HF_REPO   (public)
-    python publish_hf.py space                       # create/upload config.HF_SPACE, wait for RUNNING
+    python publish_hf.py space                       # create/upload config.HF_SPACE (needs HF PRO), wait for RUNNING
 
 Every number comes from a run artifact (metrics.jsonl, run_status.json, the Phase 1/2/4
 reports), never retyped. Needs HF_TOKEN in the environment.
@@ -151,7 +151,8 @@ out = model.generate(torch.tensor([ids]), max_new_tokens=60, min_new_tokens=16, 
 print(tok.decode(out[0, len(ids):], skip_special_tokens=True))
 ```
 
-A hosted API is at [`{config.HF_SPACE}`](https://huggingface.co/spaces/{config.HF_SPACE}).
+Try it in the browser at **[{config.SITE_URL.removeprefix("https://")}]({config.SITE_URL})**, or call the hosted API at
+`{config.API_URL}` (`POST /generate`; OpenAPI docs at [`/docs`]({config.API_URL}/docs)).
 
 ## Architecture
 

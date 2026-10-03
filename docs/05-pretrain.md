@@ -15,7 +15,7 @@ so every number below is derived from measured artifacts, not assumptions.
 | Epochs | **4** (one continuous cosine schedule, never restarted) |
 | Budget cap | **`--max-usd 50`** (`config.BUDGET_CAP_USD = 50.0`) |
 | Full-run hardware | **8 × H100** (H100 SXM5, $0.001097 / GPU-second) |
-| Publish target | `mdeepanshu/slm-125m-base` |
+| Publish target | `Deepanshu027/slm-125m-base` (the requested `mdeepanshu` namespace does not exist on HF; see `docs/06-deploy.md`) |
 
 ## 1. Preflight — verified
 

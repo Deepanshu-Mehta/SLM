@@ -24,11 +24,15 @@ continues it. It does not follow instructions or chat.
 | POST | `/score` | per-token surprise and perplexity of your own text |
 | GET | `/docs` | interactive OpenAPI docs |
 
+Live deployment: **Modal CPU, scale-to-zero** (`serve_modal.py` at the repo root), at
+`https://mdeepanshu2706--slm-125m-serve-api.modal.run`. The `Dockerfile` and the front matter
+above package the same server as a Hugging Face Docker Space, which requires an HF PRO account.
+
 ```bash
-curl -X POST https://deepanshu027-slm-125m-api.hf.space/generate \
+curl -X POST https://mdeepanshu2706--slm-125m-serve-api.modal.run/generate \
   -H 'content-type: application/json' \
   -d '{"prompt": "The court held that the defendant", "max_new_tokens": 60}'
 ```
 
-Runs on free CPU hardware. After a period of inactivity the Space sleeps, and the first
-request wakes it (this can take a few tens of seconds).
+It runs on CPU and scales to zero when idle, so the first request after a quiet period takes
+about 12 seconds. Rate limit: 30 POST requests per minute per client.

@@ -23,3 +23,8 @@ site_examples.py
 
 # Browser-test screenshots
 .playwright-mcp/
+
+# OS / tooling noise
+.DS_Store
+*.log
+.vercel/

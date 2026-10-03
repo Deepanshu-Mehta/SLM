@@ -20,3 +20,6 @@ data/
 site/
 site_data.py
 site_examples.py
+
+# Browser-test screenshots
+.playwright-mcp/

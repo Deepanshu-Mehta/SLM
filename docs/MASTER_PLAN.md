@@ -11,7 +11,7 @@ Last updated: 2026-10-03
 | 3 | Train 16K byte-level BPE tokenizer | CPU ×1 (8 vCPU) | ~$0 | **DONE** |
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
 | 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **≤ $25.32 actual** of $50 cap | **DONE** — val 2.127 / ppl 8.39 / **0.657 bits/byte** |
-| 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 (idle = $0) | model ✅ · API ✅ live, scale-to-zero · website 📋 planned |
+| 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 (idle = $0) | model ✅ · API ✅ live · website ✅ built & tested, ⏸ Vercel login |
 
 ---
 
@@ -487,3 +487,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-03 | 5 | **DONE.** 8×H100, 15,564 steps, 44.9 min, **≤ $24.78** (Phase 5 total ≤ $25.32 of $50). 3.36M tok/s, 32.1% MFU, ~99% scaling. Final held-out val **2.1269 / ppl 8.39 / 0.6572 bits/byte**, improving at all 16 evals; per-epoch gains halve each pass. Artifact verified independently; missing `architectures` in config.json fixed in code and on the Volume. Next: Phase 6 (deploy). |
 | 2026-10-03 | 6 | Model published: **Deepanshu027/slm-125m-base** (public; the `mdeepanshu` namespace does not exist, and the token is Deepanshu027's). Weights hash-verified from the Hub. FastAPI server written and tested locally. HF Docker Space **blocked by 402**: free Docker Spaces now need PRO. Website plan written (`docs/07-website-plan.md`). No Modal resources running. |
 | 2026-10-03 | 6 | Hosting decided: **Modal CPU, scale-to-zero** (HF Docker Spaces need PRO). Live at `mdeepanshu2706--slm-125m-serve-api.modal.run`: cold start 11.9 s, 11.8–17.5 tok/s, every endpoint + CORS + 429 rate limit verified from the public URL; **scaled to 0 containers 218 s after the last request**. Fixed a crash-loop (`config` missing from the image). License left unset by decision. Next: build the website per `docs/07-website-plan.md`. |
+| 2026-10-03 | 6 | **Website built** (Next.js 16, untracked by request): playground plus a 10-chapter build explainer, every number from `site.json`. Browser-tested at 1440px and 390px, light and dark; 0 console errors. Found: Phase 2 LSH = 3×10 bands (catches 29% at J=0.8, so near-dups are a floor); per-source held-out bits/byte SEC 0.463 / case law 0.687 / web 1.017. Corrected the decontam share to 10.3%. Vercel deploy waiting on login. |

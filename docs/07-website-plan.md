@@ -1,6 +1,6 @@
 # Website plan — SLM-125M on Vercel
 
-**Status:** PLAN (not built yet) · **Hosting cost target:** $0 for the site; inference backend per §9
+**Status:** ✅ BUILT and browser-tested locally (2026-10-03) · ⏸ Vercel deploy waiting on `vercel login` · site code is **untracked by request**
 
 Two things, one site:
 
@@ -265,3 +265,76 @@ HF now requires a **PRO subscription** to host Docker/Gradio Spaces, even on fre
 2. License — deliberately left unset for now (decision 2026-10-03); revisit before launch.
 3. Custom domain, or the default `*.vercel.app`?
 4. Should the site name a person or organization in its credits?
+
+---
+
+## 11. Build results (2026-10-03)
+
+The site lives in `site/` (Next.js 16.3, React 19.2, Tailwind v4, TypeScript). It is
+**excluded from git by request**, together with its data scripts `site_data.py` and
+`site_examples.py`, because it is not part of model training. All four routes (`/`,
+`/build`, `/about`, 404) prerender as **static pages**. The only runtime dependency is the
+Modal inference API.
+
+### Deviations from the plan (all simplifications)
+
+| Planned | Built | Why |
+|---|---|---|
+| Observable Plot + D3 | Hand-written SVG (line chart) and HTML/CSS (bars, stacked bar) | Fewer dependencies; full control of theming, hover/keyboard tooltips and table views |
+| `@huggingface/transformers` tokenizer | A ~140-line byte-level BPE port (`src/lib/bpe.ts`) loading our `tokenizer.json` | No ML runtime in the page. **Verified token-for-token against the Python tokenizer: 36/36 golden cases** (`§`, curly quotes, emoji, CJK, whitespace runs, special tokens), all round-tripping |
+| Framer Motion | CSS transitions, disabled under `prefers-reduced-motion` | Nothing the site does needs a motion library |
+
+### Data integrity
+
+`site_data.py` builds `site/src/data/site.json` from run artifacts. The facts strip, every
+chart and every table read that file; no number is typed into a component. New
+measurements made for the site:
+
+- **Per-shard Phase 1 results** for the 20-worker diagram. Recovered from this session's
+  run output (the Modal app logs had been purged), then **reconciled exactly** against
+  `phase1_report.json` on the Volume (streamed, kept and every drop reason, per source;
+  streamed = kept + drops in every shard).
+- **Held-out score per source** (96 windows each, each source's own bytes/token):
+  SEC **0.463** bits/byte (ppl 5.05), case law **0.687** (ppl 8.45), web **1.017** (ppl 20.6).
+- **Real cleaning excerpts**, fetched from the public datasets and annotated by the real
+  `cleaning.py` rules. Private parties' names are redacted (judges are not), and an
+  assertion fails the build if any listed name survives.
+- **LSH parameters actually used in Phase 2:** `datasketch` chose **3 bands × 10 rows** for
+  32 permutations at threshold 0.8, which flags only **29%** of pairs at Jaccard 0.8 (72% at
+  0.9). **The 1,606 near-duplicates are therefore a floor.** This was previously
+  undocumented; the site states it.
+- **Correction:** CaseHOLD decontamination removed **10.3%** of case-law documents entering
+  Phase 2 (24,002 of 232,292), not 11.6% (which wrongly divided by documents kept).
+  Fixed in the docs and on the site.
+
+### API fix found while building
+
+`/generate/stream` events are text chunks, not tokens (27 events for 30 tokens). The
+server's final `done` event now carries the true `new_tokens`, so the site's
+"N new tokens · tokens/s" figures are exact. Verified in the browser: the token view's
+client-side count (80) equals the server's (80).
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `tsc --noEmit` / `eslint` / `next build` | clean / clean (after fixing 2 setState-in-effect errors) / 4 static routes |
+| Desktop 1440px: playground | live streamed completion; "80 new tokens · 18.0 tokens/s"; token view; surprise tool reproduces ppl 488.30 / 2.552 bits/byte |
+| Phone 390px | no horizontal page scroll; bottom action bar + sampling bottom sheet; greedy completion at 32 tok/s; backend cold start shown as "Waking the model" |
+| `/build`, 10 chapters | every chart has a table view; MinHash demo default Jaccard 0.925 (est. 0.938 at 32 perms, 0.906 at 128); decontam demo flags 11 shared 13-grams; MinHash estimator error shrinks 0.039 → 0.012 from 32 → 512 permutations |
+| Keyboard | loss-chart crosshair readable with ←/→ ("6.29B · 2.111 train · 2.158 held-out", which matches the step-12k eval) |
+| Dark mode | its own palette steps; validated |
+| Console | **0 errors, 0 warnings** across the session |
+
+**Bugs found in browser testing and fixed:** the mobile chapter picker didn't stay pinned
+(sticky inside a short parent); probabilities under 0.005% showed as "0.000%" (the API
+rounds to 4 decimals, so the site now derives p from the surprise value); Chapter 7's
+caption collapsed beside its toggle on phones, and its leak colouring was overwhelming;
+mixed units in Chapter 1; the mobile output stayed below the fold on Complete.
+
+### Rebuild
+
+```bash
+.venv/bin/python site_data.py          # refresh site/src/data/site.json from artifacts
+cd site && npx next build && npx next start
+```

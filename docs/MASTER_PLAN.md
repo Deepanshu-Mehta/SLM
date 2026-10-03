@@ -10,7 +10,7 @@ Last updated: 2026-10-03
 | 2 | Dedup + decontaminate | CPU fan-out ×20 | ~$0 | **DONE** |
 | 3 | Train 16K byte-level BPE tokenizer | CPU ×1 (8 vCPU) | ~$0 | **DONE** |
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
-| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **~$37–49 est., $50 cap — HARD GATE** | Step 1 ✅ · Step 2 ✅ · Step 3 ⛔ **AWAITING APPROVAL** |
+| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **~$37–49 est., $50 cap — HARD GATE** | Step 1 ✅ · Step 2 ✅ · Step 3 **RUNNING** |
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 | PENDING |
 
 ---
@@ -481,3 +481,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-03 | 4 | **v2 rebuild — document-level val split** (approved). 2,040,088,576 train + 19,577,856 val tokens, 6,638 val docs (0.991%), every doc on exactly one side. Both verifiers pass; BPB factor 0.308978; steps 15,564; 4-epoch cost $48.52 @ 16.2% MFU. |
 | 2026-10-03 | 5 | **Step 1 DONE ($0).** data.py / train.py / pretrain_app.py written. `smoke_local.py` 31/31 on M2 Pro CPU: loss 9.90→7.87 in 20 steps; SIGKILL+resume bit-identical to an uninterrupted run; 2-proc DDP identical to single-process; HF export bos0/eos1/pad2, 100% argmax agreement. Fixed: gloo-incompatible AVG reduce; smoke warmup override. Step 2 awaits approval. |
 | 2026-10-03 | 5 | **Step 2 DONE (≤ $0.59, 1×H100, 7m46s).** Eager 15.2% MFU → 4 epochs $51.67 (over cap); **torch.compile 32.4% MFU (2.13×) → $24.28**, numerically identical losses. CUDA resume, bf16 autocast, fused AdamW, NCCL, export all exercised; no warnings. Verdict PROCEED. Step 3 projection ~$30–39 at `--max-usd 49`; awaiting approval. |
+| 2026-10-03 | 5 | Final pre-launch review: pyflakes clean, Volume clean, collectives rank-consistent; budget-stop branch exercised locally (checkpoints then exits 3, ledger persists across launches). Fixed host resources for 8 ranks (cpu 16, 96 GiB, 4 compile threads/rank). **Step 3 approved and launched**: 8×H100, `--max-usd 49 --compile`. |

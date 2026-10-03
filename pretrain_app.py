@@ -87,7 +87,10 @@ def _launch(runs: list[list[str]], n_gpus: int) -> list[dict]:
     thread.start()
     env = {**os.environ,
            "PYTHONPATH": os.pathsep.join([os.path.dirname(config.__file__),
-                                          os.environ.get("PYTHONPATH", "")])}
+                                          os.environ.get("PYTHONPATH", "")]),
+           # Each rank compiles independently; inductor's default of up to 32 worker
+           # processes per rank would mean ~256 torch-importing processes on 8 GPUs.
+           "TORCHINDUCTOR_COMPILE_THREADS": "4"}
     results = []
     try:
         for argv, run_dir in zip(runs, run_dirs):
@@ -121,8 +124,10 @@ def calibrate_1xh100() -> list[dict]:
     ], n_gpus=1)
 
 
+# Explicit host resources: 8 ranks + their compile workers must not be squeezed into
+# Modal's tiny default request. ~$0.0004/s, inside COST_OVERHEAD_FACTOR's 15%.
 @app.function(image=gpu_image, gpu=f"{config.PRETRAIN_GPU}:{config.PRETRAIN_GPU_COUNT}",
-              volumes=VOLUMES, timeout=6 * 60 * 60)
+              volumes=VOLUMES, timeout=6 * 60 * 60, cpu=16.0, memory=96 * 1024)
 def pretrain_8xh100(max_usd: float, compile: bool) -> dict:
     """Step 3: the full run. Resumes automatically if /data/checkpoints/ckpt.pt exists."""
     argv = ["--ckpt-dir", config.CKPT_DIR, "--max-usd", str(max_usd)]

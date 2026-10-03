@@ -392,3 +392,25 @@ at ~4 s each, 16 full-val evals, final export and samples.
 so Phase 5 as a whole stays under the approved $50. The live guard re-projects from
 real 8-GPU throughput after 20 steps; if 8-GPU MFU unexpectedly fell below ~16%, it
 would checkpoint and stop within the first few dollars.
+
+### Pre-launch final review (2026-10-03)
+
+Scope: what 1 GPU and 50 steps could *not* prove: branches that never executed,
+behaviour that appears only with 8 processes, and stale state on the Volume.
+
+| Check | Result |
+|---|---|
+| Static scan (pyflakes) of all Phase 5 modules | No undefined names in any branch; one unused import removed |
+| Volume state | `/data/checkpoints` holds only `calibration/`; no stale `ckpt.pt` / `spend.json` / `metrics.jsonl`, so the run starts at step 0 |
+| Collectives under 8 ranks | Every all-reduce, broadcast and barrier is gated on `done`, which is identical on every rank, so no rank can wait on a collective the others skip |
+| Paths already proven on CUDA | DDP over the compiled module, `no_sync` accumulation, fused-AdamW resume, bf16 eval, export |
+| **Budget-stop branch (had never run)** | Exercised locally with `--gpu H100 --max-usd 0.10`: it stops at step 1, **checkpoints before exiting**, exits with code 3, writes `budget_stop`, and skips the export. A relaunch resumes from that checkpoint, and **the spend ledger carries across launches** ($0.164 → $0.187, launches = 2), so preemption restarts keep counting toward the cap |
+
+**Fixed before launch:** the 8-GPU function relied on Modal's default host request
+(0.125 core, 128 MiB). Meanwhile inductor starts up to 32 compile workers per rank,
+each importing torch, which could mean ~256 processes and an OOM kill (and a
+restart loop) during the first-step compile, something a single-rank calibration
+cannot show. Now: `cpu=16.0, memory=96 GiB` (4.8% of GPU cost, inside the 15%
+overhead factor) and `TORCHINDUCTOR_COMPILE_THREADS=4`.
+
+**Launch command:** `modal run --detach pretrain_app.py::pretrain --confirm --max-usd 49 --compile`

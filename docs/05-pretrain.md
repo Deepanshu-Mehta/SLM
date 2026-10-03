@@ -1,7 +1,7 @@
 # Phase 5 — Pretrain the 125M model
 
 **Compute:** GPU (H100) · **Cost:** the only real spend in the project ·
-**Status:** ⛔ **GPU steps BLOCKED pending explicit approval** — Step 1 is $0
+**Status:** ✅ Step 1 DONE (local, $0) · ⛔ **Step 2 awaiting explicit approval**
 
 This is the approval document. Spend is approved against what is written here,
 so every number below is derived from measured artifacts, not assumptions.
@@ -283,9 +283,10 @@ replaces the recorded Phase 4 artefacts — so it needs an explicit yes.
 | `config.py` | ✅ amended: 4 epochs, $50 cap, GPU rates, `pretrain_steps()`, `projected_cost_usd()`, exact `approx_params()` |
 | `model.py` | ✅ written: factory, explicit token ids, `PROMPT_PREFIX_TOKEN_ID = EOS` |
 | `verify_model.py` | ✅ written and run: preflight invariants, fails loudly |
-| `data.py` | to write — memory-mapped windows, per-epoch shuffle, resumable, rank-disjoint |
-| `train.py` | to write — fp32 master + bf16 autocast, fused AdamW, cosine, BPB, guard, atomic ckpt |
-| `pretrain_app.py` | to write — Modal GPU function, Volume, `--max-usd` |
+| `data.py` | ✅ written: memory-mapped windows, per-epoch seeded shuffle, step-derived layout |
+| `train.py` | ✅ written: fp32 master + bf16 autocast, fused AdamW, cosine, BPB, live guard, atomic ckpt |
+| `pretrain_app.py` | ✅ written, **not yet run**: 1×H100 calibration + 8×H100 run, both refuse without `--confirm` |
+| `smoke_local.py` | ✅ written and passed: the Step 1 harness, 31 assertions |
 
 ---
 
@@ -299,4 +300,36 @@ replaces the recorded Phase 4 artefacts — so it needs an explicit yes.
 
 ## Results
 
-_(filled in after execution)_
+### Step 1 — local smoke test ✅ PASSED (2026-10-03, $0)
+
+`.venv/bin/python smoke_local.py` on the M2 Pro: **31/31 checks passed** in 36 min.
+It ran on CPU in fp32, using one val shard as a stand-in train set (1,129 windows)
+and another as val (1,522). Smoke settings: micro-batch 1, 2,048-token batch,
+`--warmup-steps 5`. Torch 2.5.1 and transformers 4.46.3 are the same pins as the
+GPU image.
+
+| Block | What was proven |
+|---|---|
+| **A. Unit checks (10)** | Warmup reaches 6e-4 at step 380 and the LR never rises again; it ends exactly at 6e-5. Each epoch is a full permutation with a different order. **A step reads the same windows for any (GPU count, micro-batch) with the same batch size.** Ranks and micro-steps never overlap. The real run is 15,564 steps, with grad-accum 2 on 8 GPUs and 16 on 1 GPU. |
+| **B. Reference run (7)** | 20 steps; loss goes 9.896 → 7.867 (mean of last 5). Step 1 is near ln(16384) = 9.70, as expected for a random init. One metrics row per step; status `max_steps`; samples generated. |
+| **C. Crash test (7)** | SIGKILLed at step 13, resumed from the step-10 checkpoint. **Every per-step loss and LR matched the uninterrupted run exactly (max diff 0.0), and the final weights are bit-identical.** Metrics were truncated on resume, so no step appears twice. |
+| **D. DDP (3)** | `torchrun --nproc_per_node=2` (gloo): world 2, accum 1, and per-step losses identical to the single-process run (max diff 0.0). This confirms the rank-disjoint layout and gradient averaging. |
+| **E. HF export (7)** | All 6 files present. `config.json` and `generation_config.json` both carry **bos 0 / eos 1 / pad 2**. `from_pretrained` loads 125,848,320 params with `lm_head` re-tied, the exported tokenizer has `<\|eos\|>` = 1, and the bf16 export agrees with the fp32 weights on **100%** of next-token argmaxes. |
+
+**Samples after 20 steps** are word salad (*"the the the, the the I, to in the in
+that of…"*), and both prompts produce the same text. That's expected: after 20
+tiny steps the model has learned only word frequencies, so the prompt barely
+changes the distribution, and the same seed gives the same draws. This only
+proves the generation path works.
+
+**Not exercised locally (CUDA-only):** bf16 autocast, fused AdamW, NCCL, and
+`torch.compile` on CUDA. Step 2 is the first run that touches these.
+
+### Bug found and fixed during Step 1
+
+- `dist.ReduceOp.AVG` exists only on NCCL. Under gloo the loss logging would have
+  crashed, so it now uses SUM ÷ world. A single 8×H100 run on NCCL would not have
+  hit this, but the local DDP test would have.
+- Warmup is derived as 200M tokens ÷ batch size, which at the 2,048-token smoke
+  batch is 97,656 steps, so the LR would never have left ~1e-8. Added
+  `--warmup-steps` (default 0 = derived), so the real run is unchanged at 381.

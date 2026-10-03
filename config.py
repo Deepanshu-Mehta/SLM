@@ -172,6 +172,14 @@ GPU_RATE_PER_SEC: Mapping[str, float] = {
 # the GPU-only projection by this factor so the cap is not breached by overhead.
 COST_OVERHEAD_FACTOR: float = 1.15
 
+# Dense bf16 tensor-core peak per GPU, FLOP/s. MFU = 6 * params * tokens/s / (n_gpu * peak).
+GPU_PEAK_BF16_FLOPS: Mapping[str, float] = {"H100": 989e12, "H200": 989e12, "A100-80GB": 312e12}
+
+# UTF-8 text bytes per token over the v2 (document-level) val split, measured by
+# verify_model.py with skip_special_tokens=True. Bits-per-byte = loss_nats / (ln2 * this).
+# Re-measure whenever the val split is rebuilt.
+VAL_BYTES_PER_TOKEN: float = 4.669241
+
 
 def pretrain_steps(train_tokens: int, epochs: int = PRETRAIN_EPOCHS) -> int:
     """Optimizer steps for the full run. train_tokens comes from tokens/index.json."""

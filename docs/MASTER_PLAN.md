@@ -10,7 +10,7 @@ Last updated: 2026-10-03
 | 2 | Dedup + decontaminate | CPU fan-out ×20 | ~$0 | **DONE** |
 | 3 | Train 16K byte-level BPE tokenizer | CPU ×1 (8 vCPU) | ~$0 | **DONE** |
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
-| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **~$37–49 est., $50 cap — HARD GATE** | ⛔ **AWAITING APPROVAL** |
+| 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **~$37–49 est., $50 cap — HARD GATE** | Step 1 ✅ · Step 2 ⛔ **AWAITING APPROVAL** |
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 | PENDING |
 
 ---
@@ -297,7 +297,10 @@ completes a prompt end to end from a cold start.
 | `model.py` | 5 | no — authored: `LlamaForCausalLM` factory, explicit token ids, EOS prompt prefix |
 | `verify_tokens.py` | 4 | no — read-only Phase 4 verifier (window alignment, decode, chars/token) |
 | `verify_model.py` | 5 | no — read-only Phase 5 preflight (param count, token ids, BOS occurrences, BPB ratio) |
-| `data.py`, `train.py`, `pretrain_app.py` | 5 | no — authored, modular + typed |
+| `data.py` | 5 | no — window store, seeded per-epoch order, step-derived layout |
+| `train.py` | 5 | no — training loop (fp32 master + bf16 autocast, DDP, guard, atomic ckpt, BPB) |
+| `pretrain_app.py` | 5 | no — Modal GPU launcher; every entrypoint requires `--confirm` |
+| `smoke_local.py` | 5 | no — Step 1 harness: 31 assertions incl. bit-exact resume and DDP parity |
 | `serve/` (Dockerfile, app.py), `web/` | 6 | no — authored |
 
 `config.py` stays the single source of truth; Phase 5/6 code imports geometry,
@@ -476,3 +479,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-09-22 | 5 | ⛔ STOPPED AT GPU APPROVAL GATE. Gate report in `docs/05-pretrain.md`. Phases 0-4 total spend: $0.00. |
 | 2026-10-03 | 5 | Plan revised: **4 epochs, $50 cap, 8×H100, HF `mdeepanshu/slm-125m-base`**. config.py amended (exact `approx_params()` = 125,848,320; `pretrain_steps()` = 15,556; GPU rates verified at $0.001097/s). `verify_model.py` preflight: ALL INVARIANTS HOLD; `<|bos|>` occurs 0× in 2.06B packed tokens → prompts use `<|eos|>`; BPB = loss × 0.309145. Cost ≈ $7.855/MFU → $48.49 at the reference 16.2% MFU (3% margin). Recommended perf stack: SDPA + fused AdamW + TF32, torch.compile A/B in calibration. Recommended doc-level val split (awaiting yes/no). |
 | 2026-10-03 | 4 | **v2 rebuild — document-level val split** (approved). 2,040,088,576 train + 19,577,856 val tokens, 6,638 val docs (0.991%), every doc on exactly one side. Both verifiers pass; BPB factor 0.308978; steps 15,564; 4-epoch cost $48.52 @ 16.2% MFU. |
+| 2026-10-03 | 5 | **Step 1 DONE ($0).** data.py / train.py / pretrain_app.py written. `smoke_local.py` 31/31 on M2 Pro CPU: loss 9.90→7.87 in 20 steps; SIGKILL+resume bit-identical to an uninterrupted run; 2-proc DDP identical to single-process; HF export bos0/eos1/pad2, 100% argmax agreement. Fixed: gloo-incompatible AVG reduce; smoke warmup override. Step 2 awaits approval. |

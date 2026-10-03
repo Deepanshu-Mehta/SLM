@@ -1,0 +1,16 @@
+# Credentials — NEVER commit
+.env.local
+.env
+*.pem
+
+# Local toolchain
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local copies of Volume artifacts
+index.json
+*.bin
+*.npz
+*.safetensors
+data/

@@ -1,6 +1,6 @@
 # Phase 6 — Publish the model and serve it
 
-**Compute:** CPU · **Cost so far:** ~$0 · **Status:** ✅ model published · ✅ API live (scale-to-zero) · 📋 website planned
+**Compute:** CPU · **Cost:** ~$0 (idle = $0) · **Status:** ✅ **DONE**: model, API and website all live
 
 Scope of this phase, per the 2026-10-03 instruction: push the model to Hugging Face,
 serve it, make sure no GPU is left running, and **plan** (not yet build) the Vercel
@@ -164,3 +164,16 @@ Modal image must contain every module the *entrypoint file* imports, not just th
 word boundaries, so 30 tokens arrive as about 27 events. The final `done` event now carries
 the true `new_tokens`, `prompt_tokens` and `stopped_on_eos`, read from the generate output.
 Verified live: 27 events, then `{"done": true, "new_tokens": 30, ...}`.
+
+## Website (2026-10-03)
+
+Live at **https://slm-125m-legal-sandy.vercel.app**. Plan, build notes and the full verification record are in
+`docs/07-website-plan.md` §11–12. The site code (`site/`) is kept out of git by request.
+
+## Phase 6 deliverables
+
+| Deliverable | URL |
+|---|---|
+| HF model repo | https://huggingface.co/Deepanshu027/slm-125m-base |
+| Inference API (Modal CPU, scale-to-zero) | https://mdeepanshu2706--slm-125m-serve-api.modal.run (`/docs` for OpenAPI) |
+| Website (Vercel) | https://slm-125m-legal-sandy.vercel.app |

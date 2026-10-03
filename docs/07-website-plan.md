@@ -1,6 +1,6 @@
 # Website plan — SLM-125M on Vercel
 
-**Status:** ✅ BUILT and browser-tested locally (2026-10-03) · ⏸ Vercel deploy waiting on `vercel login` · site code is **untracked by request**
+**Status:** ✅ **LIVE at https://slm-125m-legal-sandy.vercel.app** (2026-10-03) · site code is **untracked by request**
 
 Two things, one site:
 
@@ -338,3 +338,19 @@ mixed units in Chapter 1; the mobile output stayed below the fold on Complete.
 .venv/bin/python site_data.py          # refresh site/src/data/site.json from artifacts
 cd site && npx next build && npx next start
 ```
+
+## 12. Deployment (2026-10-03)
+
+- **Production URL: https://slm-125m-legal-sandy.vercel.app** (Vercel project `slm-125m-legal`, account `deepanshu-mehta`;
+  `slm-125m-legal.vercel.app` was unavailable, so Vercel assigned the `-sandy` alias).
+  Deployed with `npx vercel deploy --prod` from `site/`; built on Vercel; state `READY`,
+  target `production`.
+- **Public:** `/`, `/build`, `/about` and `/tokenizer.json` return 200 with the real content
+  (no deployment-protection wall), unknown paths get the 404 page, and pages are served
+  from the edge cache.
+- **Live end-to-end test on a phone viewport, from a cold backend:** the page scrolled to
+  the output, showed "Waking the model…", then streamed a legal completion:
+  **80 new tokens · 13.9 tokens/s · 15.3 s total · 9.6 s to wake/first token**. Cross-origin
+  requests from `vercel.app` to the Modal API work (CORS). **0 console errors.**
+- `vercel link` writes `site/.env.local` with a Vercel OIDC token; it is git-ignored (`site/`).
+- Redeploy: `cd site && npx vercel deploy --prod`.

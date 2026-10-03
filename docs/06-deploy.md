@@ -1,6 +1,6 @@
 # Phase 6 — Publish the model and serve it
 
-**Compute:** CPU · **Cost so far:** $0 · **Status:** model published ✅ · API hosting ⛔ blocked on a decision
+**Compute:** CPU · **Cost so far:** ~$0 · **Status:** ✅ model published · ✅ API live (scale-to-zero) · 📋 website planned
 
 Scope of this phase, per the 2026-10-03 instruction: push the model to Hugging Face,
 serve it, make sure no GPU is left running, and **plan** (not yet build) the Vercel
@@ -61,6 +61,28 @@ CORS is open, so a static Vercel site can call it directly.
 | 4 | Space builds and reaches `RUNNING` on free `cpu-basic` hardware |
 | 5 | Live `/info`, `/generate`, `/generate/stream`, `/score` all answer correctly from the public URL, including a CORS preflight |
 
+## Hosting decision (2026-10-03): Modal CPU, scale-to-zero
+
+The HF Docker Space is blocked by the PRO requirement (402). Chosen instead: serve the same,
+already-tested `serve/app.py` as a Modal web endpoint (`serve_modal.py`):
+
+| Setting | Value | Why |
+|---|---|---|
+| Hardware | **CPU only**, 2 physical cores, 3 GiB | No GPU anywhere in serving |
+| `min_containers` | **0** | **$0 while idle**: nothing runs between visits |
+| `scaledown_window` | 180 s | The container shuts itself off 3 minutes after the last request |
+| `max_containers` | **1** | Hard cap: worst case is one CPU container, ≈ **$0.12/hour** |
+| Rate limit | 30 POSTs per IP per minute → HTTP 429 | A public site can't be hammered into a big bill |
+| `@modal.concurrent` | 16 inputs | `/health` and `/info` answer even while a generation holds the lock |
+| Weights | baked into the image from `Deepanshu027/slm-125m-base` at build | One canonical copy; no download on a cold start |
+
+Take it down entirely with `modal app stop slm-125m-serve`.
+
+**Validation:** live endpoints answer from the public URL (including CORS and the 429), and
+**after the idle window the container count returns to 0**, proving nothing keeps billing.
+
+License: **left unset by decision** (2026-10-03).
+
 ## Results (2026-10-03)
 
 | # | Check | Result |
@@ -68,8 +90,8 @@ CORS is open, so a static Vercel site can call it directly.
 | 1 | No Modal app or container running | ✅ 0 live apps, 0 containers; nothing is billing |
 | 2 | Server tested locally against the verified artifact | ✅ all endpoints (below) |
 | 3 | Model loads from the Hub | ✅ **https://huggingface.co/Deepanshu027/slm-125m-base**: public, `from_pretrained` works, `architectures` present, bos/eos/pad 0/1/2, **weights SHA-256 identical** to the locally verified file |
-| 4 | Space builds on free `cpu-basic` | ⛔ **blocked**: `402 Payment Required` — *"Static Spaces are free for everyone, but hosting Gradio and Docker Spaces on free cpu-basic requires a PRO subscription."* Nothing was created |
-| 5 | Live endpoints from a public URL | ⏸ pending the hosting decision (`docs/07-website-plan.md` §9) |
+| 4 | Space builds on free `cpu-basic` | ⛔ **blocked → replaced by Modal CPU (decision 2026-10-03)**: `402 Payment Required` — *"Static Spaces are free for everyone, but hosting Gradio and Docker Spaces on free cpu-basic requires a PRO subscription."* Nothing was created |
+| 5 | Live endpoints from a public URL | ✅ **https://mdeepanshu2706--slm-125m-serve-api.modal.run** (Modal CPU, scale-to-zero): see *Live test* below |
 
 ### Local API test (`serve/app.py` against the downloaded `base/`)
 
@@ -100,3 +122,38 @@ Company's anticipated requirements for working capital and capital expenditures�
 | `publish_hf.py` | builds `training_stats.json` and the model card from run artifacts; `model` / `space` upload subcommands |
 | `serve/app.py`, `serve/Dockerfile`, `serve/requirements.txt`, `serve/README.md` | the inference API (FastAPI) and its Space packaging |
 | `docs/07-website-plan.md` | the Vercel website plan |
+
+### Live test of the Modal endpoint (2026-10-03)
+
+`https://mdeepanshu2706--slm-125m-serve-api.modal.run`, deployed with `modal deploy serve_modal.py`.
+
+| Check | Result |
+|---|---|
+| Cold start (no container → first `/health`) | **11.9 s**; warm `/health` 0.8 s |
+| `/info` | live run facts: 125,848,320 trainable params; val 2.1269 / 8.389 / 0.6572 bits/byte; 8,160,018,432 tokens; 16-point eval curve |
+| `/generate` speed (2 CPU cores) | **11.8–17.5 tokens/s**; a 60-token completion in 3.4–5.1 s |
+| `/generate/stream` | 27 SSE events then `{"done": true}` |
+| `/score` | legal ppl **5.856** vs nonsense **488.297**, identical to the local run |
+| CORS preflight | HTTP 200, `access-control-allow-origin: *` |
+| Rate limit | after exactly **30** POSTs in a minute, every further POST gets **429** |
+| **Scale to zero** | 1 container at 17:04:33 → **0 containers at 17:08:11** (218 s after the last request). App state `deployed`, **0 running tasks = $0 while idle** |
+
+Live samples:
+- *"We review the district court's grant of summary judgment de novo"* → *". Ventura v. City
+  & Cnty., 2015 MT 4, ¶ 10, 378 Mont. 212, 343 P.3d 558; Gatz v. State, 2014 MT 268, ¶ 11…"*.
+  The citation format is perfect (and `¶` survives the character filter), but **the
+  citations are invented**. That's the base-model limitation the website must disclose.
+- *"Risk Factors. An investment in our common stock involves"* → *" several risks, including
+  the following: - the potential for: - dilution of earnings and earnings per share…"*
+
+**Not verified:** whether Modal forwards each visitor's IP in `x-forwarded-for`. All test
+requests came from one machine, so the 429 proves the cap works but not whether it is
+per-visitor or shared. Either way, it bounds load.
+
+### Bug fixed during deploy
+
+The first deploy crash-looped with `ModuleNotFoundError: No module named 'config'`, and
+every request was redirected (HTTP 303) after 150 s. `serve_modal.py` imports `config`,
+which wasn't in the image. Fix: `.add_local_python_source("config")`. This is the same
+class of mistake as the earlier `verify_tokens.py` crash, and the lesson is the same: a
+Modal image must contain every module the *entrypoint file* imports, not just the server.

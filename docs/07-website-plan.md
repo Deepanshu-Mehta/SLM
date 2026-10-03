@@ -234,7 +234,20 @@ counter), **Generating**, **Error** (with a retry button).
 
 ---
 
-## 9. Decision needed: where inference runs
+## 9. Where inference runs — ✅ DECIDED: Modal CPU, scale-to-zero (2026-10-03)
+
+**Endpoint:** `https://mdeepanshu2706--slm-125m-serve-api.modal.run` (set as
+`NEXT_PUBLIC_API_URL` in Vercel). Measured: **11.9 s cold start**, 0.8 s warm,
+11.8–17.5 tokens/s, $0 when idle (verified to scale to 0 containers), at most one container,
+30 POSTs/min rate limit. Design implications for the site:
+
+- Because of the cold start, §5's background `/health` ping on page load is
+  **mandatory**: it hides most of the 12 s before the visitor presses Generate.
+- At ~15 tokens/s a 256-token completion takes ~17 s, so **streaming is mandatory** (the
+  first words appear in under a second once warm). Default `max_new_tokens` stays 80.
+- A 429 response shows *"Busy — try again in N s"* using the exposed `Retry-After` header.
+
+The original comparison, kept for the record:
 
 HF now requires a **PRO subscription** to host Docker/Gradio Spaces, even on free CPU
 (`402 Payment Required` when creating `Deepanshu027/slm-125m-api`). The FastAPI server in
@@ -248,7 +261,7 @@ HF now requires a **PRO subscription** to host Docker/Gradio Spaces, even on fre
 
 ## 10. Open questions
 
-1. Backend option A, B or C (§9).
-2. License for the model and site (the model card currently leaves it unset).
+1. ~~Backend option (§9)~~ — decided: A, Modal CPU.
+2. License — deliberately left unset for now (decision 2026-10-03); revisit before launch.
 3. Custom domain, or the default `*.vercel.app`?
 4. Should the site name a person or organization in its credits?

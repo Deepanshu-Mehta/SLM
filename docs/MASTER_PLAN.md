@@ -11,7 +11,7 @@ Last updated: 2026-10-03
 | 3 | Train 16K byte-level BPE tokenizer | CPU ×1 (8 vCPU) | ~$0 | **DONE** |
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
 | 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **≤ $25.32 actual** of $50 cap | **DONE** — val 2.127 / ppl 8.39 / **0.657 bits/byte** |
-| 6 | Deploy (HF repo + inference API + web frontend) | CPU | $0 so far | model ✅ published · API ⛔ hosting decision · website 📋 planned |
+| 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 (idle = $0) | model ✅ · API ✅ live, scale-to-zero · website 📋 planned |
 
 ---
 
@@ -455,9 +455,9 @@ Each worker calls `volume.commit()` before returning.
    held-out **validation perplexity**, resumable from `/data/checkpoints/ckpt.pt`.
 4. ✅ ACHIEVED — `/data/checkpoints/base/` is a standard HF model directory that loads with
    `AutoModelForCausalLM.from_pretrained` (verified independently; `architectures` added).
-5. The weights are published to the HF repo in `config.HF_REPO`.
-6. A public inference endpoint answers `POST /generate` with a coherent
-   domain-register completion for a legal prefix.
+5. ✅ ACHIEVED — weights published at `Deepanshu027/slm-125m-base` (public, hash-verified from the Hub).
+6. ✅ ACHIEVED — `https://mdeepanshu2706--slm-125m-serve-api.modal.run` answers `POST /generate`
+   with coherent legal/SEC completions (Modal CPU, scale-to-zero, verified to idle at 0 containers).
 7. A live website calls that endpoint and shows the completion, handling cold start.
 8. `docs/00-setup.md` … `docs/06-deploy.md` each record what ran and the **actual**
    measured results, and this master plan's status table is all `DONE`.
@@ -486,3 +486,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-03 | 5 | Final pre-launch review: pyflakes clean, Volume clean, collectives rank-consistent; budget-stop branch exercised locally (checkpoints then exits 3, ledger persists across launches). Fixed host resources for 8 ranks (cpu 16, 96 GiB, 4 compile threads/rank). **Step 3 approved and launched**: 8×H100, `--max-usd 49 --compile`. |
 | 2026-10-03 | 5 | **DONE.** 8×H100, 15,564 steps, 44.9 min, **≤ $24.78** (Phase 5 total ≤ $25.32 of $50). 3.36M tok/s, 32.1% MFU, ~99% scaling. Final held-out val **2.1269 / ppl 8.39 / 0.6572 bits/byte**, improving at all 16 evals; per-epoch gains halve each pass. Artifact verified independently; missing `architectures` in config.json fixed in code and on the Volume. Next: Phase 6 (deploy). |
 | 2026-10-03 | 6 | Model published: **Deepanshu027/slm-125m-base** (public; the `mdeepanshu` namespace does not exist, and the token is Deepanshu027's). Weights hash-verified from the Hub. FastAPI server written and tested locally. HF Docker Space **blocked by 402**: free Docker Spaces now need PRO. Website plan written (`docs/07-website-plan.md`). No Modal resources running. |
+| 2026-10-03 | 6 | Hosting decided: **Modal CPU, scale-to-zero** (HF Docker Spaces need PRO). Live at `mdeepanshu2706--slm-125m-serve-api.modal.run`: cold start 11.9 s, 11.8–17.5 tok/s, every endpoint + CORS + 429 rate limit verified from the public URL; **scaled to 0 containers 218 s after the last request**. Fixed a crash-loop (`config` missing from the image). License left unset by decision. Next: build the website per `docs/07-website-plan.md`. |

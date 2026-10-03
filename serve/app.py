@@ -12,13 +12,14 @@ import math
 import os
 import threading
 import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Iterator
 
 import torch
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
@@ -33,12 +34,40 @@ STATS: dict[str, Any] = json.loads((MODEL_DIR / "training_stats.json").read_text
 # Byte-level tokens that are an incomplete UTF-8 sequence decode to U+FFFD on their
 # own; sampling them is what produces "unicode garbage". Valid characters (§ ’ —) stay.
 PARTIAL_UTF8_IDS = [i for i in range(len(tokenizer)) if "�" in tokenizer.decode([i])]
-LOCK = threading.Lock()  # 2 vCPUs: one generation at a time
+LOCK = threading.Lock()  # one generation at a time; parallel ones would only thrash the CPU
+RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "30"))
+_hits: dict[str, deque[float]] = defaultdict(deque)
+_hits_lock = threading.Lock()
 
 app = FastAPI(title="SLM-125M API", version="1.0",
               description="Pretrained 125M base model (legal + SEC + web). Completion only.")
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    """Per-IP sliding window on POSTs, so a public site can't be run up into a bill."""
+    if request.method == "POST":
+        forwarded = request.headers.get("x-forwarded-for", "")
+        ip = forwarded.split(",")[0].strip() or (request.client.host if request.client else "?")
+        now = time.time()
+        with _hits_lock:
+            hits = _hits[ip]
+            while hits and now - hits[0] > 60:
+                hits.popleft()
+            if len(hits) >= RATE_LIMIT_PER_MIN:
+                retry = int(61 - (now - hits[0]))
+                return JSONResponse({"detail": f"rate limit: {RATE_LIMIT_PER_MIN} requests/minute"},
+                                    status_code=429, headers={"Retry-After": str(retry)})
+            hits.append(now)
+            if len(_hits) > 10_000:  # forget idle clients
+                for key in [k for k, v in _hits.items() if not v or now - v[-1] > 60]:
+                    del _hits[key]
+    return await call_next(request)
+
+
+# Added last = outermost, so even a 429 carries CORS headers and the browser can read it.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"],
-                   allow_headers=["*"])
+                   allow_headers=["*"], expose_headers=["Retry-After"])
 
 
 class GenerateRequest(BaseModel):

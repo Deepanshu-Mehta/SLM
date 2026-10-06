@@ -160,6 +160,22 @@ is flagged:
 
 → The 1,606 near-duplicates are a **floor**, not a full count.
 
+### E-17 · Phase 7 planning measurements (2026-10-06)
+- **Gemini key:** the `GEMINI_API_KEY` in `.env.local` lists `gemini-3.8-flash`, `gemini-3.5-flash`,
+  `gemini-3.1-pro-preview` and others (a metadata call, $0). There is no Anthropic key yet.
+- **Tokenizer on QA-style text:** a numeric SEC passage + question + answer encodes at
+  **3.3 characters per token**, against 4.67 bytes/token on held-out prose. That's why RAFT
+  passages are capped at 160 tokens, so 4 fit in the 1,024-token context.
+- **Teacher prices on 2026-10-06** (Batch API, per million tokens, in / out):
+  - `gemini-3.8-flash`: $0.375 / $1.875, the pricing page says "through Dec 31, 2026"
+  - `claude-haiku-4-5`: $0.50 / $2.50
+  - `claude-sonnet-5`: $1 / $5
+  - `gpt-5-mini`: $0.125 / $1
+  - `gemini-3.1-pro-preview`: $1 / $6
+- **Retired:** Claude 3.5 Haiku and 3.5 Sonnet, which the brief named.
+
+→ `docs/08-raft.md`
+
 ## Decision log
 
 | ID | Date | Decision | Why |

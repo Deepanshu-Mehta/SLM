@@ -1,7 +1,7 @@
 # MASTER PLAN — 125M Legal/Financial SLM, from scratch to deployment
 
 Status legend: `PENDING` / `RUNNING` / `DONE` / `BLOCKED`
-Last updated: 2026-10-03
+Last updated: 2026-10-06
 
 | Phase | Name | Compute | Cost | Status |
 |-------|------|---------|------|--------|
@@ -12,6 +12,7 @@ Last updated: 2026-10-03
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
 | 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **≤ $25.32 actual** of $50 cap | **DONE** — val 2.127 / ppl 8.39 / **0.657 bits/byte** |
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 (idle = $0) | **DONE**: model, API and website live |
+| 7 | Grounded SFT / RAFT (answer only from passages, refuse otherwise) | APIs + **GPU H100×1** | ≈ $80 est., $98 staged caps | **PLANNED**: `docs/08-raft.md`; awaiting approval |
 
 ---
 
@@ -22,6 +23,7 @@ specialized on US legal + SEC-financial text, pretrained on a corpus we construc
 ourselves (fresh tokenizer, fresh weights), then deploy it for public inference.
 
 No SFT, no alignment, no RAG in this build. The deliverable is a **base completer**.
+(Phases 0–6. Post-training was added later as Phase 7, grounded SFT / RAFT: see `docs/08-raft.md`.)
 
 ### Final architecture (config.ModelConfig — maps 1:1 to `transformers.LlamaConfig`)
 
@@ -490,3 +492,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-03 | 6 | Hosting decided: **Modal CPU, scale-to-zero** (HF Docker Spaces need PRO). Live at `mdeepanshu2706--slm-125m-serve-api.modal.run`: cold start 11.9 s, 11.8–17.5 tok/s, every endpoint + CORS + 429 rate limit verified from the public URL; **scaled to 0 containers 218 s after the last request**. Fixed a crash-loop (`config` missing from the image). License left unset by decision. Next: build the website per `docs/07-website-plan.md`. |
 | 2026-10-03 | 6 | **Website built** (Next.js 16, untracked by request): playground plus a 10-chapter build explainer, every number from `site.json`. Browser-tested at 1440px and 390px, light and dark; 0 console errors. Found: Phase 2 LSH = 3×10 bands (catches 29% at J=0.8, so near-dups are a floor); per-source held-out bits/byte SEC 0.463 / case law 0.687 / web 1.017. Corrected the decontam share to 10.3%. Vercel deploy waiting on login. |
 | 2026-10-03 | 6 | **DONE. Website live at https://slm-125m-legal-sandy.vercel.app** (Vercel production, public). Live phone-viewport test from a cold backend: 80 tokens, 13.9 tok/s, 9.6 s to first token, cross-origin to Modal OK, 0 console errors. All Phase 6 deliverables live. |
+| 2026-10-06 | 7 | **Planned** (`docs/08-raft.md`). Teacher: `gemini-3.8-flash` (generation + blind verification; the key already works) with `claude-sonnet-5` as the independent judge for dev/test, evaluation and a 5% audit. 20K examples (55% answerable / 25% refusal / 20% grounded tasks) + ~20% pretraining replay; dev/test only from val documents. Staged caps: $5 bake-off → $25 pilot → $5 pilot GPU → $60 scale + $3 GPU. Nothing executed; no spend. |

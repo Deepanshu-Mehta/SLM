@@ -1,9 +1,12 @@
 # Phase 7: Grounded SFT / RAFT (plan)
 
-**Status: PLANNED, not executed.** Written 2026-10-06. Every paid step below waits for explicit
-approval. Results get recorded in §13 as each step runs.
+**Status: PLANNED, not executed.**
 
-Brief: `instruction.txt` (the user's draft). Earlier recommendation: `EXPERIMENTS.md` D-15.
+- **Written 2026-10-06; revised 2026-10-16** to the low-cost setup the user chose: DeepSeek Flash
+  as the teacher, Gemini Flash as the independent checker, 10,000 training examples, ≈ $20.
+- Every paid step below waits for explicit approval. Results get recorded in §13 as each step runs.
+- Brief: `instruction.txt` (the user's draft). Earlier recommendation: `EXPERIMENTS.md` D-15.
+  Cost comparison behind this revision: `EXPERIMENTS.md` E-18.
 
 ## 0. Summary
 
@@ -15,124 +18,120 @@ first. Every training example puts 4 passages in the prompt. In answerable examp
 the answer and 3 are hard distractors. In refusal examples none holds it, and the target is a fixed
 refusal string.
 
-| | Recommendation |
+| | Plan |
 |---|---|
-| Teacher | **`gemini-3.8-flash` (Batch API)** generates the data and blindly verifies the training examples. **`claude-sonnet-5` (Batch API)** independently adjudicates the dev/test labels, judges the student's answers, and audits a 5% sample of training labels |
-| Dataset | **20,000 training examples**, sized after a 2,000-example pilot: 55% answerable QA, 25% unanswerable → refusal, 20% grounded non-QA tasks. Plus **pretraining replay** (~20% of tokens) against forgetting. Dev 500 and test 1,000, built only from held-out documents |
+| Teacher | **`deepseek-flash`** (DeepSeek-V4.1-Flash), run **off-peak**. It writes every training target and blindly checks every candidate. Thinking is **off**, except when checking refusal labels |
+| Independent checker | **`gemini-3.8-flash`** (Batch API), a different model family. It co-labels dev/test, audits 5% of training labels, and judges the student's answers. It never writes training targets |
+| Dataset | **10,000 training examples**: 55% answerable QA, 25% unanswerable → refusal, 20% grounded non-QA tasks. Plus **pretraining replay** (~20% of tokens) against forgetting. Dev 500 and test 1,000, built only from held-out documents. If the test targets are missed, generate more data and retrain; that's incremental, not a restart |
+| Cost levers adopted | (1) DeepSeek off-peak. (2) 10K examples. (3) Pre-filter the passages questions are written from. (5) Thinking only where labels are hard. **Not adopted:** packing more questions into one call (saves ~2% and hurts diversity) |
 | Training | Full fine-tune from the fp32 Phase 5 checkpoint. LR 1e-4 (swept in the pilot), 3 epochs, loss on assistant tokens only, 1 × H100, a few minutes |
 | Metrics | Hallucination rate, over-refusal rate, grounded accuracy, citation accuracy, verbatim-quote rate, and forgetting (held-out bits/byte, CaseHOLD) |
-| Cost | Teacher API ≈ **$80** in total, staged ($5 bake-off → $25 pilot → $60 scale-up), each stage approved separately. GPU ≈ **$3**, capped at $5 |
+| Cost | **≈ $20 in total** (API ≈ $17, GPU ≈ $3). Stage caps sum to $31, and each stage is approved separately |
 
 ## 1. Starting point (review findings that shape this phase)
 
 | Fact | Consequence |
 |---|---|
-| Context is **1,024 tokens**; the tokenizer averages 4.67 bytes/token on prose but **3.3 chars/token** on QA-style text full of numbers (measured 2026-10-06) | k = 4 passages of ≤ 160 tokens each (≈ 650 tokens), question ≤ 48, answer ≤ 128. Anything over 1,024 is dropped, never truncated |
+| Context is **1,024 tokens**; the tokenizer averages 4.67 bytes/token on prose but **3.3 chars/token** on QA-style text full of numbers (E-17) | k = 4 passages of ≤ 160 tokens each (≈ 650 tokens), question ≤ 48, answer ≤ 128. Anything over 1,024 is dropped, never truncated |
 | Chat tokens `<|user|>` 4, `<|assistant|>` 5, `<|system|>` 6 exist in the tokenizer but **never occurred in training**. With tied embeddings, those rows only learned "never predict me" | Before SFT, initialise rows 4–6 to the mean trained embedding plus small noise. Keep suppressing them at decode time |
 | Prompts must start with `<|eos|>` (D-07) | Every SFT sequence starts with id 1 |
 | The corpus is one document per line in `/data/corpus/<source>/*.txt`; the val split is `blake2b(text, 8 bytes) % 100 == 0` (6,638 documents never trained on) | **Train examples come only from train documents; dev/test only from val documents.** The test then measures grounding on text the model never saw. Reuse `modal_app._is_val_doc`'s exact rule |
 | The near-duplicate count is a floor (LSH catches 29% at J = 0.8) | Near-duplicates can cross the split, so test passages that share 13-grams with any SFT training passage are filtered out |
 | `/data/checkpoints/ckpt.pt` holds the **fp32** final weights; `base/` is a bf16 export | SFT initialises from `ckpt.pt`, never from the bf16 export |
 | `train.py` already has autocast, the optimizer builder (no decay on norms), atomic saves, the spend ledger, `export_hf` and the evaluator | `sft.py` imports them rather than duplicating them. The pretraining loop itself (`WindowStore` order) doesn't fit SFT, so it needs a new loop |
-| `.env.local` holds `GEMINI_API_KEY` (verified: the key lists `gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.1-pro-preview`, …). It has **no Anthropic key** | The Sonnet 5 role needs `ANTHROPIC_API_KEY` added to `.env.local` by the user |
-| `requirements.txt` has no `google-genai`, `anthropic`, or `bm25s` | Add them, pinned, when implementing |
+| `.env.local` has `GEMINI_API_KEY` (verified working) but **no `DEEPSEEK_API_KEY`** | The user adds `DEEPSEEK_API_KEY` before step 7.3. No Anthropic key is needed |
+| `requirements.txt` has no `google-genai`, `openai` (DeepSeek's API is OpenAI-compatible), or `bm25s` | Add them, pinned, when implementing |
 | No CaseHOLD evaluator exists | Write `eval_casehold.py` (§8.4) |
 
-## 2. Teacher model (brief task 1)
+## 2. Teachers (brief task 1)
 
-The brief's candidate list is dated. **Claude 3.5 Haiku and 3.5 Sonnet were retired in 2025–26**, and
-GPT-4o-mini and Llama 3.1 have been superseded. These are the current equivalents. Prices are per
-million tokens, **Batch API** (50% off standard), taken from the vendors' pricing pages on 2026-10-06:
+The brief's candidates are dated: Claude 3.5 Haiku and 3.5 Sonnet are retired, and GPT-4o-mini and
+Llama 3.1 have been superseded. Current prices, per million tokens, checked 2026-10-06 to 2026-10-15:
 
-| Model | Batch in / out | Role it could play | Notes |
-|---|---|---|---|
-| **`gemini-3.8-flash`** | $0.375 / $1.875 | generator + blind verifier | Newest Flash on the user's key. Pricing page shows this price "through Dec 31, 2026". Thinking level is configurable |
-| `gemini-3.5-flash-lite` | $0.15 / $1.25 | cheap generator | Weaker; only worth it if the bake-off shows parity |
-| `gemini-3.1-pro-preview` | $1.00 / $6.00 | judge, if Gemini-only | Preview status |
-| `claude-haiku-4-5` | $0.50 / $2.50 | generator (bake-off rival) | Successor to the brief's "Claude 3.5 Haiku" |
-| **`claude-sonnet-5`** | $1.00 / $5.00 | **independent judge / adjudicator** | Successor to "Claude 3.5 Sonnet"; a different model family from the generator |
-| `gpt-5-mini` | $0.125 / $1.00 | generator | Cheapest strong option; needs an OpenAI key the user doesn't have |
-| Llama 3.1 / Qwen3 (self-hosted) | GPU time | generator | **Reject Llama 3.1**: its license requires models trained on its outputs to carry "Llama" in their name, and it is weak by 2026 standards. Qwen3 is Apache-2.0 but means a vLLM deployment and a GPU gate, for lower verification quality |
+| Model | In / out | Notes |
+|---|---|---|
+| **`deepseek-flash`** (V4.1-Flash) | **off-peak** $0.15 / $0.60; cache hits $0.003. **Peak** is double | Thinking switchable per request. No batch API. Peak is 01:00–04:00 and 06:00–10:00 UTC, Mon–Fri. **Terms explicitly allow training other models on outputs** |
+| `deepseek-v4-pro` | off-peak $0.66 / $1.98 | As expensive as Gemini Flash with no quality need here; not used |
+| **`gemini-3.8-flash`** | batch $0.375 / $1.875 | The price is listed "through Dec 31, 2026". The key already works. Used as the checker only |
+| `claude-sonnet-5` | batch $1 / $5 | Was the judge in the first draft. Swapped for Gemini, saving ~$8 and removing the need for an Anthropic key |
+| `gpt-5-mini` | batch $0.125 / $1 | No OpenAI key; not needed |
+| Llama 3.1 | self-hosted | Rejected: its license requires derived models to carry "Llama" in their name |
 
-**Recommendation: generate and verify the training data with `gemini-3.8-flash`, and use
-`claude-sonnet-5` for everything that has to be independent.**
-
-- **Generation is the easy part.** Writing a question about one passage and copying out a quote is
-  well within any current model. Mistakes are mostly *mechanical* (a quote that isn't verbatim, a
-  copied question, a number that differs from the passage), and the deterministic checks in §5.4
-  catch those whichever model writes the data. That makes the cheapest strong model the right choice,
-  and the user's Gemini key is already set up.
+**Why this split:**
+- **Writing targets is the easy part.** A question about one passage plus a copied quote is well
+  within a current flash-tier model. Its mistakes are mostly *mechanical* (a quote that isn't
+  verbatim, a copied question, a changed number), and §5.2's deterministic checks catch those. The
+  cheapest capable model is the right writer.
 - **What decides quality is the label on hard cases:** does any of the 4 passages actually answer the
   question? A wrong "unanswerable" label teaches **over-refusal**; a wrong "answerable" label teaches
-  **hallucination**. Two safeguards cover this:
-  - Every candidate gets a **blind** verification pass. The verifier sees only the 4 passages and the
-    question, never the intended answer.
-  - Dev/test labels, which define every number reported, are adjudicated by a **different model
-    family** (Sonnet 5). That keeps Gemini's blind spots out of the measurement.
-- **The 5% audit** has Sonnet 5 re-label a random 5% of the training set. If Sonnet and Gemini
-  disagree on more than **5%** of it, switch the remaining training verification to Sonnet 5 (about
-  +$45 at 20K). This decision is made on data, not taste.
+  **hallucination**. Four safeguards cover this:
+  - Every candidate gets a **blind** check. The checker sees only the 4 passages and the question,
+    never the intended answer.
+  - DeepSeek **thinks** on refusal-label checks (buckets B1/B2), where reasoning pays.
+  - **Dev/test labels**, which define every reported number, are kept only where DeepSeek and Gemini
+    **independently agree**.
+  - A **5% audit** of training labels by Gemini. If the two disagree on more than **5%** of the
+    audit, the remaining training labels are re-checked by Gemini (≈ $13). That needs a separate
+    approval because it exceeds the stage cap.
 - **About refusal-constraint adherence** (the brief asks specifically): the student's refusal comes
-  from the *labels*, not from the teacher refusing. Teachers are never asked to refuse; they are asked
-  to judge answerability as structured JSON. That measures exactly the property the brief cares about,
-  and the bake-off measures it per model.
-- **Caveat:** these model versions were released after my training data, so I can't vouch for them
-  from experience. **Step 7.3, a ~$2 bake-off**, compares `gemini-3.8-flash` with `claude-haiku-4-5`
-  on the same 100 passages before any real spend. The rule is set in advance: Gemini stays unless
-  Haiku's yield of verified examples is ≥ 10 points higher.
-
-**Terms of use (the user's call, not legal advice).** Both vendors restrict using their services to
-build competing models:
-- Gemini API terms: "you may not use the Services to develop models that compete with" them.
-- Anthropic's commercial terms prohibit using the services "to train competing AI models"; customers
-  own their Outputs.
-
-A 125M legal-domain research model is a long way from a competing general assistant, but read the
-current terms before publishing a model or dataset made from teacher outputs. Use the **paid** Gemini
-tier: on the free tier, Google may use prompts and outputs to improve its products, and the rate limits
-are far too low for 15K+ requests.
+  from the *labels*, not from the teacher refusing. Teachers are never asked to refuse; they judge
+  answerability as structured JSON, and that's what the trial measures.
+- **Caveat:** DeepSeek-V4.1-Flash and Gemini 3.8 Flash were released after my training data, so I
+  can't vouch for them from experience. **Step 7.3, a ≈ $1.50 trial**, measures them before any
+  real spend, with decision rules fixed in advance (§5.3).
+- **Terms and data:**
+  - DeepSeek's terms explicitly permit "training other models (such as model distillation)" and
+    assign outputs to the user. All training targets come from DeepSeek.
+  - Gemini's terms bar developing competing models. Here Gemini only labels and grades; the user
+    should still read its terms before publishing anything.
+  - DeepSeek processes requests in China. Only public corpus text (court opinions, SEC filings,
+    educational web pages) is ever sent to it.
+  - Use the **paid** Gemini tier: free-tier prompts may be used by Google, and its rate limits are too
+    low.
 
 ## 3. Dataset architecture and sizing (brief task 2)
 
-### 3.1 Size: 20,000 training examples (set by the pilot)
+### 3.1 Size: 10,000 training examples, topped up only if the test demands it
 
-- A 125M model has to learn three things at once: a new turn format, span copying across distracting
-  context, and a calibrated answer/refuse decision. Comparable extractive-QA fine-tunes of ~100M
-  models use tens of thousands of examples (SQuAD 2.0 has 130K), and a pilot below ~2K would be too
-  noisy to read.
-- The pilot trains on 1K and 2K examples. If dev metrics still rise clearly from 1K to 2K, scale to
-  20K; if they're flat, stop at about 10K and save ~$25.
-- **Dev 500 / test 1,000**, from val documents only, adjudicated by Sonnet 5. They are built once and
-  frozen before any training.
+- A 125M model has to learn a new turn format, span copying across distracting context, and a
+  calibrated answer/refuse decision. 10K examples is enough to learn those, and it is the cheapest
+  size the pilot can justify.
+- **The pilot learning curve (7.6)** trains at 500, 1,000 and 2,000 examples. "Flat" means the gain
+  from 1K → 2K is within dev noise (about ±3–4 points on 500 items).
+  - **Flat:** 10K is ample.
+  - **Still climbing clearly:** 10K is still the first step. After the final test, if targets are
+    missed and the curve suggests data will help, generate more (≈ $0.85 per extra 1,000 kept
+    examples) and retrain (< $1 GPU), with approval.
+- **Dev 500 / test 1,000**, from val documents only. They are built once and frozen before any training.
 
 ### 3.2 Composition
 
-| Bucket | Share (of 20K) | Count | What the example contains | Target |
+| Bucket | Share | Count (of 10K) | What the example contains | Target |
 |---|---|---|---|---|
-| **A. Answerable QA** | **55%** | 11,000 | oracle + 3 hard distractors; oracle position uniform over 1–4 | source, verbatim quote, short answer |
-| **B1. Unanswerable, oracle removed** | 15% | 3,000 | an A-style question with 4 hard distractors; adjacent chunks of the oracle's document excluded | refusal |
-| **B2. Unanswerable, near miss** | 7.5% | 1,500 | the question's topical passage *is present* but lacks the asked detail (e.g. asks the 2021 figure when the passage gives 2020), plus 3 distractors | refusal |
-| **B3. No usable context** | 2.5% | 500 | the question with 0 passages, or 4 passages from an unrelated source | refusal |
-| **C. Grounded tasks** | **20%** | 4,000 | 4 passages; an instruction about one of them: one-sentence summary, extract a list (parties, dates, amounts), or yes/no check with a quote (**about half "No"**) | the response, citing its source |
-| **D. Replay** (outside the 20K) | ~20% of training tokens | — | raw 1,024-token windows from the pretraining **train** split | plain LM loss |
+| **A. Answerable QA** | **55%** | 5,500 | oracle + 3 hard distractors; oracle position uniform over 1–4 | source, verbatim quote, short answer |
+| **B1. Unanswerable, oracle removed** | 15% | 1,500 | an A-style question with 4 hard distractors; adjacent chunks of the oracle's document excluded | refusal |
+| **B2. Unanswerable, near miss** | 7.5% | 750 | the question's topical passage *is present* but lacks the asked detail (e.g. asks the 2021 figure when the passage gives 2020), plus 3 distractors | refusal |
+| **B3. No usable context** | 2.5% | 250 | the question with 0 passages, or 4 passages from an unrelated source | refusal |
+| **C. Grounded tasks** | **20%** | 2,000 | 4 passages; an instruction about one of them: one-sentence summary, extract a list (parties, dates, amounts), or yes/no check with a quote (**about half "No"**) | the response, citing its source |
+| **D. Replay** (outside the 10K) | ~20% of training tokens | — | raw 1,024-token windows from the pretraining **train** split | plain LM loss |
 
 - **Source mix:** case law 40 / SEC 40 / web 20, matching the pretraining mix. Questions and passages
   for a given example come from the same source.
 
 **Why these ratios:**
-- **25% refusal (B1 + B2 + B3)** sits inside both reference points: SQuAD 2.0 is ~1/3 unanswerable, and
-  RAFT found it best to keep the oracle in 60–80% of training examples.
+- **25% refusal (B1 + B2 + B3)** sits inside both reference points: SQuAD 2.0 is ~1/3 unanswerable,
+  and RAFT found it best to keep the oracle in 60–80% of training examples.
   - More refusals push toward **over-refusal syndrome**; fewer leave **hallucination**.
   - It is treated as a hyperparameter: the pilot trains at **15 / 25 / 35%** and picks the share
     with the best balance on dev (§7.2).
 - **B2 matters most.** Without near misses, the model learns a lexical shortcut, "refuse when no
   passage shares words with the question". B2 forces it to read whether the specific detail is there.
 - **C is the "general instruction" bucket, deliberately grounded.** Open-domain instruction data
-  (Alpaca-style chat answered from memory) teaches exactly the behaviour this phase is trying to
-  remove, and a 125M model holds too little world knowledge to answer from memory reliably (E-13: it
-  invents facts). Grounded tasks still provide the format diversity that general data normally gives.
-  The **"No" answers in C** teach the difference between "the passage says no" and "the passage
-  doesn't say", which is the other main cause of over-refusal.
+  (chat answered from memory) teaches exactly the behaviour this phase is trying to remove, and a 125M
+  model holds too little world knowledge to answer from memory reliably (E-13: it invents facts).
+  Grounded tasks still give the format diversity general data normally provides. The **"No" answers
+  in C** teach the difference between "the passage says no" and "the passage doesn't say", which is
+  the other main cause of over-refusal.
 - **D (replay) is the forgetting guard.** Mixing in a slice of the original LM objective is the
   standard fix for catastrophic forgetting. Its effect is measured with held-out bits/byte against
   the 0.6572 baseline.
@@ -172,18 +171,26 @@ Grounded task (C) uses `Task: {instruction}` in place of `Question:`, and the ta
 - **Quote before answer.** The model copies a span and then answers from it. That's the RAFT
   chain-of-thought idea cut down to a copy step, which small models are relatively good at
   (induction heads). Quotes can also be **checked mechanically** at evaluation.
-- **Preprocessing:**
-  - (1) Chunk each document into sentence-packed passages of 60–160 tokens (our tokenizer).
-  - (2) Drop low-quality passages: alphabetic ratio < 0.6, table/number fragments, citation lists.
-  - (3) Deduplicate passages exactly, and 13-gram filter test against train (§1).
-  - (4) Mine distractors with BM25 using the *question* as the query, from other documents of the same
-    source, so they're lexically close but don't answer.
-  - (5) Shuffle passage order so the oracle is uniform over positions 1–4.
-  - (6) Tokenise, **drop** anything over 1,024 tokens, and right-pad to exactly 1,024. The fixed shape
-    means `torch.compile` compiles once.
-  - (7) Labels are −100 everywhere except the assistant span and its final `<|eos|>`.
-  - (8) Store as `uint16` input ids plus a loss mask (npz or memmap), with a JSONL sidecar holding the
-    raw fields for evaluation.
+
+### 4.1 Preprocessing
+
+1. Chunk each document into sentence-packed passages of 60–160 tokens (our tokenizer).
+2. **Two passage pools:**
+   - **Source pool** (passages questions are written from) is **pre-filtered**. Drop passages with
+     alphabetic ratio < 0.6, boilerplate (legal-notice and cover-page patterns), citation lists, and
+     OCR noise. Keep **~10% table- or number-heavy SEC passages** on purpose, so numeric questions
+     survive. This raises the keep rate (assumed 65% → 80%; the trial measures it).
+   - **Distractor pool** is **unfiltered**, so the model still sees tables, citation lists and messy
+     text in its context and doesn't become brittle.
+3. Exact-dedupe passages; 13-gram filter test against train (§1).
+4. Mine distractors with BM25 using the *question* as the query, from other documents of the same
+   source, so they're lexically close but don't answer.
+5. Shuffle passage order so the oracle is uniform over positions 1–4.
+6. Tokenise, **drop** anything over 1,024 tokens, and right-pad to exactly 1,024. The fixed shape
+   means `torch.compile` compiles once.
+7. Labels are −100 everywhere except the assistant span and its final `<|eos|>`.
+8. Store as `uint16` input ids plus a loss mask, with a JSONL sidecar holding the raw fields for
+   evaluation.
 
 ## 5. Execution steps
 
@@ -194,13 +201,13 @@ records its actual results in §13.
 |---|---|---|---|---|
 | 7.0 | This plan; add `RAFT`/`SFT` constants to `config.py` | local | $0 | the user approves the plan |
 | 7.1 | **Baselines**: CaseHOLD zero-shot accuracy; held-out bits/byte on a fixed 600-window subset (200 per source) | local CPU | $0 | — |
-| 7.2 | **Passage pool + BM25**: fan-out, one worker per corpus shard → passages; BM25 index per split and source | Modal CPU | ≈ $0.1 | — |
-| 7.3 | **Teacher bake-off**: 100 passages; generators `gemini-3.8-flash` vs `claude-haiku-4-5`; labels verified by Sonnet 5 | local → APIs | ≤ **$5** | **spend approval** + Anthropic key |
-| 7.4 | **Pilot data**: 2,400 kept train examples (enough to subsample 15/25/35% refusal mixes of 2,000), dev 500, test 1,000 | local → APIs | ≤ **$25** | **spend approval** |
+| 7.2 | **Passage pools + BM25**: fan-out, one worker per corpus shard → source and distractor pools; BM25 index per split and source | Modal CPU | ≈ $0.1 | — |
+| 7.3 | **Trial**: 150 source passages; both models generate; every candidate checked three ways (DeepSeek thinking on, thinking off, Gemini) | local → APIs | ≈ $1.50, cap **$3** | **spend approval** + `DEEPSEEK_API_KEY` |
+| 7.4 | **Pilot data**: 2,400 kept train examples (enough for 15/25/35% refusal mixes of 2,000), dev 500, test 1,000 | local → APIs | ≈ $7.50, cap **$10** | **spend approval** |
 | 7.5 | **Local SFT smoke test** (`smoke_sft.py`) | local CPU | $0 | — |
-| 7.6 | **Pilot sweep**: 3 LRs × 3 refusal shares + a 1K-example learning-curve point = 10 short runs in one container | 1 × H100 | ≤ **$3** | **GPU gate** |
-| 7.7 | Evaluate the pilot on dev → pick LR, refusal share, τ; decide 10K vs 20K | local / Modal CPU | ≈ $1 (judge) | — |
-| 7.8 | **Scale**: generate the rest of the training data; 5% Sonnet audit; full SFT; final test evaluation | APIs + 1 × H100 | ≤ **$60** API + ≤ **$2** GPU | **spend approval + GPU gate** |
+| 7.6 | **Pilot sweep**: 3 LRs × 3 refusal shares at 2,000 examples, plus 500- and 1,000-example curve points = 11 short runs in one container | 1 × H100 | ≈ $2, cap **$4** | **GPU gate** |
+| 7.7 | Evaluate the pilot on dev → pick LR, refusal share and τ; read the learning curve | local / Modal CPU | ≈ $0.40 (Gemini judge) | — |
+| 7.8 | **Scale to 10K**: generate the remaining 7,600; 5% Gemini audit; full SFT; final test evaluation | APIs + 1 × H100 | API ≈ $7.90, cap **$12**; GPU ≈ $0.50, cap **$2** | **spend approval + GPU gate** |
 | 7.9 | Record results; export `/data/raft/runs/final/hf/`; update MASTER_PLAN / PROJECT_STATE / EXPERIMENTS | local | $0 | — |
 
 Publishing the SFT model to HF, adding a grounded endpoint, and a playground mode on the website
@@ -214,13 +221,15 @@ confirmed first.
   - CaseHOLD accuracy is reported with its 95% CI against 20% chance.
 - **7.2:**
   - Every passage's document hash agrees with its split.
-  - 0 val passages in the train pool.
-  - A token-length histogram is inside 60–160.
+  - 0 val passages in either train pool.
+  - The token-length histogram is inside 60–160.
+  - Filter drop rates are reported per source, and table-heavy SEC passages are ≈ 10% of the source pool.
   - BM25 sanity: querying with a sentence from a passage returns that passage top-1 for ≥ 95% of
     500 probes.
 - **7.3 / 7.4 / 7.8:**
-  - Mechanical-check pass rates and verification yield are reported per bucket and source.
+  - Mechanical-check pass rates and keep rates are reported per bucket and source.
   - The spend ledger is ≤ the stage cap.
+  - Every DeepSeek call is timestamped, to confirm off-peak.
   - The user spot-checks 50 random dev/test items.
 - **7.5:**
   - The loss mask covers exactly the assistant span plus EOS.
@@ -237,8 +246,9 @@ confirmed first.
 
 ### 5.2 Mechanical checks on teacher output (model-free, all buckets)
 
-1. Output is valid JSON matching the schema; teachers are called with JSON-schema-constrained output.
-2. The `quote` is a **verbatim substring** of the oracle passage after whitespace normalisation, and
+1. Output is valid JSON matching the schema. DeepSeek is called in JSON mode; anything that fails to
+   parse or validate is discarded, never repaired.
+2. The `quote` is a **verbatim substring** of the source passage after whitespace normalisation, and
    ≤ 40 words.
 3. Every number, date and capitalised name in `answer` appears verbatim in the passage (catches
    numeric hallucination).
@@ -248,25 +258,44 @@ confirmed first.
 6. No question is duplicated within or across splits (normalised exact match).
 7. The fully formatted example is ≤ 1,024 tokens.
 
-### 5.3 Acceptance after blind verification
+### 5.3 Trial decision rules (fixed before the trial runs)
 
-| Bucket | Keep only if the verifier says |
+| Question | Measured on the trial | Rule |
+|---|---|---|
+| Is DeepSeek a good enough writer? | keep rate (mechanical + blind check) for DeepSeek vs Gemini as generator | DeepSeek stays unless Gemini's keep rate is **≥ 10 points higher**; otherwise re-quote and ask |
+| Does thinking help the refusal labels? | agreement with Gemini on B1/B2 candidates, DeepSeek thinking on vs off | if thinking-off agreement is **within 2 points**, turn thinking off everywhere (saves ≈ $2.60 more on the ~12,500 training candidates) |
+| Are the cost assumptions right? | real tokens per call, keep rate, thinking length | re-quote every later stage cap from measured numbers before 7.4 |
+| Are the two checkers compatible? | DeepSeek-vs-Gemini agreement over all candidates | if below **85%**, inspect disagreements before going on: the prompt, not the model, is usually the problem |
+
+### 5.4 Acceptance after the blind check
+
+| Bucket | Keep only if the checker says |
 |---|---|
 | A | `answerable` true, `support == [oracle]` (unique), not `ambiguous`, and its answer agrees with the generator's (identical numbers/names, or token-F1 ≥ 0.5) |
-| B1, B2 | `answerable` false and not `ambiguous` |
-| B3 | no verification needed (no passages, or a different source) |
-| C | the verifier completes the task with the same Yes/No (yes/no), or confirms every item appears in the passage (extract) |
+| B1, B2 | `answerable` false and not `ambiguous` (DeepSeek thinking on) |
+| B3 | no check needed (no passages, or a different source) |
+| C | the checker reaches the same Yes/No (yes/no), or confirms every item appears in the passage (extract) |
 
-- **Dev/test labels:** kept only when Gemini's verification **and** Sonnet 5's both agree with the
-  intended label; disagreements are dropped. Expected yield is ~65% of candidates; the bake-off
-  measures it.
+- **Dev/test labels:** kept only when DeepSeek (thinking on for every dev/test check) **and** Gemini
+  independently agree with the intended label. Disagreements are dropped. Expected yield is ~62% of
+  candidates.
+
+### 5.5 Running DeepSeek without a batch API
+
+- Concurrent ordinary requests (OpenAI-compatible client), with a bounded worker pool, exponential
+  backoff on 429/5xx, and an append-only JSONL of responses, so a crash resumes without re-paying.
+- `teacher.py` **refuses to send during peak hours** (01:00–04:00 and 06:00–10:00 UTC, Mon–Fri)
+  unless `--allow-peak` is passed. Peak doubles the price.
+- The fixed instructions come first in every request and the passage last, so the instruction prefix
+  is served from DeepSeek's cache ($0.003 per million tokens).
+- The spend guard sums `usage` × price after every response and stops at `--max-usd`.
 
 ## 6. Teacher prompt templates (brief task 3, part 1)
 
-All calls use JSON-schema output. `{source_desc}` is one of "US court opinion", "SEC filing" or
-"educational web page". Thinking is set to the lowest level that passes the bake-off.
+One question type per call; prompts are deliberately **not** merged (§0). `{source_desc}` is one of
+"US court opinion", "SEC filing" or "educational web page".
 
-**G1: answerable QA (generator)**
+**G1: answerable QA (writer: DeepSeek, thinking off)**
 
 ```
 You write training data for a small model that must answer ONLY from passages it is given.
@@ -289,13 +318,14 @@ Rules:
 7. If the passage is boilerplate, a table fragment, a list of citations, garbled OCR, or lacks
    the context for a specific question, return {"items": []}.
 
+Reply with JSON only: {"items": [{"question": ..., "answer": ..., "quote": ..., "type": ...}]}
+
 Source: {source_desc}
 Passage:
 """{passage}"""
 ```
-Schema: `{"items": [{"question", "answer", "quote", "type"}]}`
 
-**G2: near-miss unanswerable (generator)**
+**G2: near-miss unanswerable (writer: DeepSeek, thinking off)**
 
 ```
 You write test questions for a model that must refuse when its passages lack the answer.
@@ -303,15 +333,16 @@ You receive one passage from a {source_desc}. Write ONE question that a reader w
 passage to answer (same parties, subject and time period) but that it does NOT answer: it asks
 for a specific detail the passage never states. The question must not be answerable by inference
 from the passage, and must not be about an obviously unrelated topic. Name the entity it concerns.
-If no such question is possible, return {"question": null}.
+
+Reply with JSON only: {"question": ..., "missing_detail": ...}, or {"question": null} if no
+such question is possible.
 
 Source: {source_desc}
 Passage:
 """{passage}"""
 ```
-Schema: `{"question": str|null, "missing_detail": str}`
 
-**G3: grounded task (generator)**, where `{task}` ∈ summarize, extract_list, yes_no_check
+**G3: grounded task (writer: DeepSeek, thinking off)**, where `{task}` ∈ summarize, extract_list, yes_no_check
 
 ```
 You write instructions for a model that must work ONLY from passages it is given.
@@ -325,13 +356,15 @@ response.
   "Yes." or "No." then a verbatim quote of at most 30 words that decides it. Make the claim false
   ("No.") about half of the time, by changing one detail of something the passage does state.
 
+Reply with JSON only: {"instruction": ..., "response": ..., "quote": ... or null}
+
 Source: {source_desc}
 Passage:
 """{passage}"""
 ```
-Schema: `{"instruction", "response", "quote"|null}`
 
-**V1: blind verifier** (Gemini for training data; Sonnet 5 for dev/test and the 5% audit)
+**V1: blind check.** DeepSeek runs it on every candidate, with thinking on for B1/B2 and all
+dev/test checks. Gemini runs the same prompt on dev/test and the 5% audit.
 
 ```
 You check training examples for a model that must answer only from the passages it is given.
@@ -343,12 +376,13 @@ Using ONLY the passages below (no outside knowledge), decide:
 - ambiguous: true if the question is unclear, or could refer to different things in different
   passages.
 
+Reply with JSON only: {"answerable": bool, "support": [int], "answer": str or null, "ambiguous": bool}
+
 {passages, numbered 1..k, exactly as the student will see them}
 Question: {question}
 ```
-Schema: `{"answerable": bool, "support": [int], "answer": str|null, "ambiguous": bool}`
 
-**J1: evaluation judge** (Sonnet 5; used only on student outputs that answer rather than refuse)
+**J1: evaluation judge** (Gemini; used only on student outputs that answer rather than refuse)
 
 ```
 You grade a small model's answer. Use ONLY the passages; ignore outside knowledge.
@@ -356,12 +390,13 @@ You grade a small model's answer. Use ONLY the passages; ignore outside knowledg
   adding a wrong claim, makes it false.
 - supported: every factual claim in the model's answer is stated in the passages.
 
+Reply with JSON only: {"correct": bool, "supported": bool}
+
 {passages}
 Question: {question}
 Reference answer: {reference}
 Model answer: {model_answer}
 ```
-Schema: `{"correct": bool, "supported": bool}`
 
 ## 7. Training recipe (brief task 3, part 3)
 
@@ -376,7 +411,7 @@ Schema: `{"correct": bool, "supported": bool}`
 | Optimiser | fused AdamW, β (0.9, 0.95), ε 1e-8, weight decay 0.1 on matrices and embeddings only | same as pretraining (D-08) |
 | Peak LR | **1e-4**; the pilot sweeps 5e-5 / 1e-4 / 2e-4 | pretraining ran 6e-4 → 6e-5; SFT should sit near the end of that range |
 | Schedule | linear warmup over 3% of steps, cosine decay to 10% of peak | |
-| Batch | 64 sequences (micro 32 × 2 accumulation) ≈ 65K tokens incl. padding | ~390 steps/epoch at 20K + replay |
+| Batch | 64 sequences (micro 32 × 2 accumulation) ≈ 65K tokens incl. padding | ~195 steps/epoch at 10K + replay |
 | Epochs | **3**; keep the checkpoint with the best dev decision-F1 | small data, so watch for overfitting |
 | Sequence | exactly 1,024 tokens, right-padded | one compiled shape |
 | Loss | cross-entropy on assistant tokens + final `<|eos|>`, averaged per token over the batch | the prompt isn't a target |
@@ -385,15 +420,18 @@ Schema: `{"correct": bool, "supported": bool}`
 | Eval decoding | greedy, ≤ 128 new tokens, stop at `<|eos|>`, suppress ids 0, 2–6 | deterministic metrics |
 | Seed | 1337 | |
 
-**Compute.** 20K examples × 1.25 (replay) × 1,024 × 3 epochs ≈ 77M tokens. At the measured 425K
-tokens/s (E-10), that's ~3 minutes of training plus ~3 minutes of startup and compilation on 1 × H100,
-≈ **$0.75**. The pilot's 10 runs share one container: ≈ 25 min, ≈ **$2**. Each launch uses
-`--max-usd` (5 for the pilot, 3 for the full run), with checkpoints every 100 steps.
+**Compute.**
+- **Full run:** 10K examples × 1.25 (replay) × 1,024 × 3 epochs ≈ 38M tokens. At the measured 425K
+  tokens/s (E-10), that's ~90 s of training plus ~4 min of startup, compilation and evaluation on
+  1 × H100, ≈ **$0.50**.
+- **Pilot:** the 11 runs share one container, ≈ 25 min, ≈ **$2**.
+- **Guards:** each launch uses `--max-usd` (4 for the pilot, 2 for the full run), with checkpoints
+  every 100 steps.
 
 ### 7.2 Pilot sweep → choice
 
-- **Runs:** LR {5e-5, 1e-4, 2e-4} × refusal share {15, 25, 35%} at 2,000 examples, plus a learning-curve
-  point at 1,000 examples using the best setting.
+- **Runs:** LR {5e-5, 1e-4, 2e-4} × refusal share {15, 25, 35%} at 2,000 examples, plus learning-curve
+  points at 500 and 1,000 examples using the best setting.
 - **Selection score on dev:** maximise grounded accuracy − hallucination rate − over-refusal rate, on
   deterministic metrics only (no judge cost).
 - **Ties:** prefer the lower hallucination rate.
@@ -417,7 +455,8 @@ Dev is used only for selection and τ.
 | Format validity | output parses into `Source:` / `Quote:` / `Answer:` | ≥ 0.99 |
 | Refusal precision / F1, **AUROC of P(none)** | answer/refuse as a classifier, scored at the decision token | reported |
 
-- **Breakdowns:** by source (case law / SEC / web), oracle position (1–4) and bucket.
+- **Breakdowns:** by source (case law / SEC / web), oracle position (1–4), bucket, and table-heavy vs
+  prose source passages. That last one checks the pre-filter didn't cost numeric skill.
 - **Position bias:** accuracy across positions should vary by < 10 points.
 
 ### 8.2 Forgetting guards
@@ -429,7 +468,7 @@ Dev is used only for selection and τ.
 
 - The **base model** with a 1-shot plain-text prompt.
 - **Always refuse:** hallucination 0, over-refusal 100%.
-- **Teacher ceiling:** `gemini-3.8-flash` on 200 test items.
+- **Teacher ceiling:** `deepseek-flash` on 200 test items, judged by Gemini.
 
 ### 8.4 CaseHOLD baseline (7.1)
 
@@ -441,24 +480,31 @@ Dev is used only for selection and τ.
 - **Purpose:** a general legal-reasoning measure that moves independently of the RAFT format.
 
 The targets were set **before** seeing any results. If one is missed, the miss is recorded and
-diagnosed, and the target is never quietly lowered.
+diagnosed, and the target is never quietly lowered. At 10K examples, a miss first triggers the
+learning-curve check in §3.1 (more data or not).
 
 ## 9. Budget and gates
 
 | Stage | Cap | Estimate | Basis |
 |---|---|---|---|
-| 7.3 bake-off | $5 | ≈ $2 | 100 passages × 2 generators + Sonnet verification of ~400 candidates |
-| 7.4 pilot data | $25 | ≈ $20 | ~6,400 candidates generated and verified by Gemini (≈ $12) + Sonnet adjudication of the ~2,700 dev/test candidates (≈ $8) |
-| 7.6 pilot GPU | $5 | ≈ $2 | 1 × H100, ~25 min |
-| 7.8 scale data | $60 | ≈ $56 | ~27K candidates via Gemini ($0.0018 each ≈ $49) + 5% Sonnet audit (≈ $4) + final J1 (≈ $3) |
-| 7.8 full SFT | $3 | ≈ $0.75 | 1 × H100, ~6 min |
-| **Phase 7 total** | **$98** | **≈ $80** | |
+| 7.3 trial | $3 | ≈ $1.50 | 150 passages × 2 writers; ~300 candidates checked 3 ways |
+| 7.4 pilot data | $10 | ≈ $7.50 | ~3,000 train + ~2,400 dev/test candidates through DeepSeek (≈ $4.60); Gemini co-labels dev/test and judges dev (≈ $2.90) |
+| 7.6 pilot GPU | $4 | ≈ $2 | 1 × H100, ~25 min |
+| 7.8 scale data | $12 | ≈ $7.90 | ~9,500 candidates through DeepSeek (≈ $6.40); 5% Gemini audit + final J1 + ceiling (≈ $1.50) |
+| 7.8 full SFT | $2 | ≈ $0.50 | 1 × H100, ~6 min |
+| **Phase 7 total** | **$31** | **≈ $20** | API ≈ $17, GPU ≈ $3 |
 
-- **Token assumptions:** generation is ~900 in / ~600 out per passage, giving 2 candidates.
-  Verification is ~1,250 in / ~300 out. Kept/candidate yield is 65%. The bake-off measures all three,
-  and the caps are re-quoted before 7.4 if they're off.
-- **Spend guard:** `teacher.py` sums `usage` × price after every batch and refuses to submit a batch
-  that would cross `--max-usd`.
+- **Assumptions behind the estimate:**
+  - Off-peak DeepSeek.
+  - Per candidate: ~1,700 input tokens, ~1,000 of them a cached instruction prefix; ~600 output
+    tokens, plus ~1,000 thinking tokens on refusal-label and dev/test checks.
+  - Thinking on for ~35% of training checks.
+  - Keep rate 80% (train) and 62% (dev/test, which needs two models to agree).
+  - The trial measures all of these, and every cap is re-quoted before 7.4.
+- **Not included:**
+  - The audit fallback (Gemini re-checks all training labels, ≈ $13). It only happens if the audit
+    fails, and needs its own approval.
+  - Any top-up beyond 10K (≈ $0.85 per extra 1,000 kept examples).
 - **GPU:** every entrypoint requires `--confirm`, and nothing may be left running afterwards
   (`modal container list` → 0).
 
@@ -466,14 +512,14 @@ diagnosed, and the target is never quietly lowered.
 
 | File | Purpose |
 |---|---|
-| `config.py` | add `RAFT_DIR`, a `RaftConfig` (k = 4, passage 60–160 tokens, mix ratios, sizes, refusal string, teacher model ids, prices) and an `SFTConfig` (§7.1) |
+| `config.py` | add `RAFT_DIR`, a `RaftConfig` (k = 4, passage 60–160 tokens, mix ratios, sizes, refusal string, model ids, prices, peak hours) and an `SFTConfig` (§7.1) |
 | `raft_data.py` | pure, unit-tested logic: chunking, passage filters, the split rule, prompt/target formatting, mechanical checks, output parsing, metrics |
 | `raft_app.py` | Modal: passage-pool fan-out (one worker per corpus shard, keeping the fan-out design), BM25 build, distractor mining, dataset assembly; SFT GPU entrypoints gated by `--confirm` |
-| `teacher.py` | local: build, submit and collect Gemini and Anthropic **batch** jobs; spend ledger; keys read from `.env.local` and never logged |
+| `teacher.py` | local: concurrent DeepSeek calls (off-peak guard, retries, resumable JSONL) and Gemini batch jobs; spend ledger; keys read from `.env.local` and never logged |
 | `sft.py` | SFT trainer; imports helpers from `train.py` |
 | `eval_raft.py`, `eval_casehold.py` | the metrics in §8 |
 | `smoke_sft.py` | the local checks for 7.5 |
-| `requirements.txt` | add `google-genai`, `anthropic`, `bm25s` (pinned) |
+| `requirements.txt` | add `openai` (DeepSeek client), `google-genai`, `bm25s` (pinned) |
 
 `cleaning.py`, `dedup.py` and `modal_app.py` are not touched.
 
@@ -481,27 +527,29 @@ diagnosed, and the target is never quietly lowered.
 
 | Risk | Mitigation |
 |---|---|
-| A 125M model may plateau at modest accuracy | Mostly extractive targets, a quote-first format, and pilot learning curves before scaling. A plateau is a result to record, not something to hide |
-| Label noise in refusals (a distractor actually answers) → over-refusal | Blind verification, excluding adjacent chunks, the 5% cross-family audit with a switch rule |
-| Ambiguous questions (a passage that never names its company) | G1 rule 2, the verifier's `ambiguous` flag, filtering out passages that lack context |
+| A 125M model may plateau at modest accuracy | Mostly extractive targets, a quote-first format, pilot learning curves. A plateau is a result to record, not something to hide |
+| 10K examples may be too few | Learning curve in the pilot; incremental top-up (≈ $0.85 per 1,000) if test targets are missed |
+| Pre-filter narrows the training distribution (fewer numeric/table questions) | Filter only the source pool; distractors unfiltered; ~10% table-heavy SEC sources kept; table-vs-prose test breakdown |
+| Label noise in refusals (a distractor actually answers) → over-refusal | Blind check with thinking for B1/B2, excluding adjacent chunks, the 5% cross-family audit with a fallback rule |
+| Flash-tier models on both sides may share blind spots | Different families; dev/test needs both to agree; the user spot-checks 50 items |
+| DeepSeek has no batch API; peak pricing doubles cost | Resumable concurrent client; off-peak guard in `teacher.py` |
+| DeepSeek JSON mode is not schema-enforced | Strict validation; failures are dropped and counted, never repaired |
+| Ambiguous questions (a passage that never names its company) | G1 rule 2, the checker's `ambiguous` flag, the context filter |
 | Lexical shortcut for refusal | BM25 hard negatives retrieved with the question, B2 near misses, paraphrase enforcement |
 | Position bias | Uniform oracle position; per-position metrics |
 | Forgetting | Replay; bits/byte and CaseHOLD guards |
 | Train/test leakage through near-duplicates | Split by document plus the 13-gram filter on test |
-| Price and terms drift | Prices dated 2026-10-06 (Gemini "through Dec 31, 2026"); re-quoted at each gate; the user reviews the terms |
+| Price and terms drift | Prices dated 2026-10-15 (Gemini "through Dec 31, 2026"); re-quoted at each gate; the user reviews the terms |
+| Data sent to DeepSeek is processed in China | Only public corpus text is ever sent |
 | 1,024-token context limits multi-passage reasoning | Out of scope; extending context to 2,048 is a separate option (a few dollars of continued pretraining) |
 
 ## 12. Decisions needed from the user
 
-1. **Teacher setup:** `gemini-3.8-flash` (generation + training verification) plus `claude-sonnet-5`
-   (dev/test adjudication, judge, audit). That requires adding `ANTHROPIC_API_KEY` to `.env.local`.
-   Alternative: Gemini only, with `gemini-3.1-pro-preview` as the independent judge (same family, less
-   independent).
-2. **Phase 7 budget:** ≈ $80 expected, $98 in total caps, approved stage by stage (7.3 → 7.4 → 7.6
-   → 7.8).
+1. **Approve this plan** (DeepSeek Flash writer + Gemini Flash checker, 10K, ≈ $20).
+2. **Add `DEEPSEEK_API_KEY`** to `.env.local` before step 7.3.
 3. **Gemini billing:** confirm the key's project is on the paid tier.
-4. **Terms:** acknowledge §2's note on using teacher outputs.
-5. **Scale:** confirm 20K as the default; it's revisited with pilot data in 7.7.
+4. **Terms:** acknowledge §2's note on Gemini's terms and on sending public text to DeepSeek.
+5. **Stage approvals** as each gate comes up: 7.3 ($3) → 7.4 ($10) → 7.6 GPU ($4) → 7.8 ($12 + $2 GPU).
 
 ## 13. Results
 

@@ -176,6 +176,37 @@ is flagged:
 
 → `docs/08-raft.md`
 
+### E-18 · Teacher cost comparison: Gemini vs DeepSeek (2026-10-15)
+- **Prices (per million tokens):**
+  - `deepseek-flash` (DeepSeek-V4.1-Flash), off-peak: $0.15 in / $0.60 out / $0.003 cache hit.
+    Peak (01:00–04:00 and 06:00–10:00 UTC, Mon–Fri) is double.
+  - `deepseek-v4-pro`, off-peak: $0.66 / $1.98.
+  - There is no batch API. The terms explicitly allow training other models on outputs.
+- **Modelled cost per 1,000 candidates** (~1,700 in, ~1,000 of it a cached prefix, ~600 out):
+
+  | Setup | Per 1,000 candidates |
+  |---|---|
+  | `gemini-3.8-flash`, batch | $1.76 |
+  | DeepSeek Flash, no thinking | **$0.47** |
+  | DeepSeek Flash, +1,000 thinking tokens on every check | $1.07 |
+  | DeepSeek Pro, no thinking | $1.67 |
+
+- **Phase 7 totals (modelled):**
+
+  | Setup | Total |
+  |---|---|
+  | Gemini writer + Sonnet 5 judge, 20K | ≈ $77 |
+  | DeepSeek Flash + Gemini checker, 20K | ≈ $46 |
+  | Same, with the levers below | ≈ $28 |
+  | **Same, at 10K** | **≈ $20** |
+
+- **Levers:** off-peak; 10K examples; pre-filter the source passages (assumed keep rate 65 → 80%);
+  thinking only on refusal-label checks.
+- **Packing more questions into one call saves ~2%** (the instruction prefix is already a cache hit,
+  and the blind check needs one call per candidate). Rejected for its cost to diversity.
+
+These are models, not measurements; the step 7.3 trial measures them. → `docs/08-raft.md` §9
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -195,6 +226,7 @@ is flagged:
 | D-13 | 10-03 | **License deferred** (user) | The owner's decision. The README says all rights are reserved |
 | D-14 | 10-05 | Rewrite history to drop `initial.txt`; keep the email; **the user pushes manually** | The user's choice before the first push |
 | D-15 | 10-05 | Phase 7 plan (recommendation, not yet executed): **direct RAFT with teacher-written, quote-grounded targets**; refuse when the correct passage is missing; $0 baseline first; ~2K-example pilot | 125M params can't absorb a teacher's knowledge; logit distillation is impossible (different vocabulary); 1,024-token context; chat format never seen |
+| D-16 | 10-16 | Phase 7 setup (user's choice): **`deepseek-flash` writes and checks, off-peak; `gemini-3.8-flash` is the independent checker; 10K training examples; pre-filter source passages; thinking only on refusal-label checks**; ≈ $20 | E-18: about 4× cheaper than Gemini + Sonnet at 20K. DeepSeek's terms allow training on outputs. Quality is protected by two-family agreement on dev/test labels, the 5% audit, and incremental top-up if targets are missed |
 
 ## Corrections log
 

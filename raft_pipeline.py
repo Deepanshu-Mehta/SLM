@@ -502,11 +502,11 @@ def cmd_select(args) -> None:
                 if r["bucket"] == "B1" and grp in ("dev", "test"):
                     raise SystemExit(f"{r['cid']}: excluding a paired B1 needs its A twin handled too")
                 spare = next((x for x in by[r["bucket"]] if x["cid"] not in in_use and x["cid"] not in excl), None)
-                if spare is None:
-                    raise SystemExit(f"no spare {r['bucket']} in {grp} to replace {r['cid']}")
-                chosen[i] = spare
-                in_use.add(spare["cid"])
-                swapped.append({"group": grp, "out": r["cid"], "in": spare["cid"], "reason": excl[r["cid"]]})
+                chosen[i] = spare                    # None = no reviewed spare left: an honest shortfall
+                if spare is not None:
+                    in_use.add(spare["cid"])
+                swapped.append({"group": grp, "out": r["cid"], "in": spare and spare["cid"], "reason": excl[r["cid"]]})
+        chosen = [r for r in chosen if r is not None]
         got = Counter(r["bucket"] for r in chosen)
         shortfall[grp] = {b: q - got[b] for b, q in quota.items() if got[b] < q}
         rng.shuffle(chosen)

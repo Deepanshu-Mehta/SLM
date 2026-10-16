@@ -318,6 +318,20 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   a stated figure look absent. The near-miss bucket needs extra scrutiny wherever it defines
   reported numbers.
 
+### E-25 · Full read-through of dev/test near misses (2026-10-16, $0)
+- **Coverage:** 137 dev/test B2 items + 41 spares, read against all passages.
+- **Result:** 24 of 137 (17.5%) dropped under a sharpened rule.
+  - **Drop if** stated, computable from figures for the same item, partial/qualitative for the same
+    item, or underspecified.
+  - **Keep if** the tempting figure belongs to a different year, entity or metric.
+  - 7 of 41 spares also failed.
+- **Breakdown of drops:** computable 8 / partial 6 / underspecified or case-name 6 / answerable 4.
+- **Effect:** dev now has 36 B2 (499 total, 1 short), test 100. Every B2 is reviewed; other rows
+  are unchanged.
+- **Lesson.** Two independent checkers agreeing is not enough for near misses: both accept items
+  whose answer is one subtraction or one qualitative phrase away. Train B2 likely has similar noise.
+  For 7.8: G2 prohibitions plus a B2-specific "plausible answer" check.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -341,6 +355,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-17 | 10-16 | Phase 7 review fixes (user-approved patch): SFT and replay losses normalised separately (λ = 0.25, per-token within SFT); rows 4–6 sampled from N(μ, Σ); dev/test leakage scanned against the whole pretraining corpus; paired A/B1 with same-document distractors; C-bucket placeholder and V2 check; DeepSeek thinking explicitly off, with `max_tokens` caps; per-bucket audit fallback (≤ $3); pilot compiled once | E-19. Net cost ≈ $0; estimate stays ≈ $20 |
 | D-18 | 10-16 | Keep the 10% leak rule; build the dev/test pool only from leak-scanned passages (SEC per-document cap 3, numeric quota filled first); record the SEC BM25 top-1 check as failed-and-explained (top-10 recall 99.6%) | E-20: relaxing the rule would let near-copies of training filings into the test; enough clean SEC passages exist |
 | D-19 | 10-16 | After the 7.3 trial: DeepSeek stays the writer; DeepSeek checks run **without thinking** (`TEACHER.think_on_refusal_checks = False`); answer agreement is symmetric containment | Pre-registered rules (E-22). Thinking's extra rejections were mostly "ambiguous" flags, and Gemini sided with thinking-off on 10 of 16 |
+| D-20 | 10-16 | Dev/test near misses must pass a manual read under the sharpened rule (drop if stated/computable/partial/underspecified; keep different-item hard negatives); dev accepts a 1-item B2 shortfall rather than lowering the bar | E-25. The user chose the $0 full read over accepting ~5–10% noise in the numbers that define results |
 
 ## Corrections log
 

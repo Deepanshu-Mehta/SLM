@@ -966,3 +966,64 @@ filled exactly; no shortfall.**
   Y2K *budget*).
 - Re-uploaded to `raft/datasets/pilot/`. The reviewed `spot_check.md` is kept unchanged.
 
+### 7.4 Near-miss (B2) read-through: all dev/test items (2026-10-16, $0)
+**Scope.** The assistant read all 137 dev/test B2 items and the 41 unused accepted spares: each
+question against its full topical passage, plus a name/term screen of the other three passages
+(any hit read in full). Every verdict and reason is in `b2_review.json` / `b2_spare_review.json`.
+
+**Rule** (sharpened in batch 6 and applied consistently, including retroactively).
+- **Drop** when:
+  - (a) a passage states the fact, or it follows by simple arithmetic from figures that clearly
+    belong to the asked item;
+  - (b) the question is underspecified (an unnamed party, or two parts) and some passage answers a
+    reasonable reading;
+  - (c) a passage gives a partial or qualitative answer for the same item.
+- **Keep** when the tempting statement clearly concerns a *different* item (a different year,
+  entity, facility or metric). Those are the valuable hard negatives. Under the sharpened rule, 3
+  earlier drops (#59, #70, #86) were restored.
+
+**Result.**
+- **24 of 137 dropped (17.5%)** in the reviewed sets.
+
+  | Reason | Count |
+  |---|---|
+  | Computable from stated figures | 8 |
+  | Partial / qualitative answer | 6 |
+  | Underspecified party or case-name question | 6 |
+  | Answerable or near-answerable | 4 |
+
+- **7 of 41 spares also failed.**
+- **Recurring generator patterns:**
+  - "name of the defendant in *Payne*";
+  - figures that subtract or divide to the answer;
+  - "a modest/growing portion" for "what percentage";
+  - unlabelled table columns paired with hallucinated years (2020, 2023);
+  - yes/no questions about something being absent;
+  - two-part questions.
+- **Excellent hard negatives kept** (the tempting figure belongs to another item):
+  - interest expense for 1998 when 1999 is asked;
+  - the street value for the bathroom, not the bedroom;
+  - another company's revenue;
+  - an offset well's production rate;
+  - "unspecified monetary damages".
+
+**Applied** through `exclusions.json` (now 33 entries, each with its reason). `select` now records
+an honest shortfall when no reviewed spare is left.
+
+| Set | Near misses changed | Now |
+|---|---|---|
+| Dev | 13 out / 12 in | **36 B2, 1 short: dev = 499** |
+| Test | 13 out / 13 in | 100 B2 |
+
+- Every dev/test B2 now carries a reviewed "keep" verdict. No non-B2 row changed. Train and probe
+  are identical, and the 150 test pairs are intact. Re-uploaded.
+
+**Consequences.**
+- **Train B2 (210 items) is unreviewed** and likely carries similar noise (≈ 5% clearly
+  answerable, ≈ 17% under the strict rule). That is acceptable for the pilot sweep, and recorded as
+  a caveat.
+- **For 7.8:**
+  - add the patterns above to G2 as prohibitions;
+  - add a B2-specific check ("could a careful reader give a plausible answer, including by
+    arithmetic or a partial statement?") before scaling.
+

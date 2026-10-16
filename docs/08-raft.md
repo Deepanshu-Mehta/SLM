@@ -634,7 +634,8 @@ learning-curve check in §3.1 (more data or not).
 | `teacher.py` | local: concurrent DeepSeek calls (off-peak guard, retries, resumable JSONL) and Gemini batch jobs; spend ledger; keys read from `.env.local` and never logged |
 | `raft_prompts.py` | the §6 prompts, split into a fixed (cacheable) system part and a variable user part |
 | `raft_pipeline.py` | the local stage CLI: sources → generate → candidates → assemble → check → report; paid steps need `--confirm` |
-| `sft.py` | SFT trainer; imports helpers from `train.py`; its own loss (§7.1), per-source evaluation index lists, and a greedy `generation_config` written over `export_hf`'s |
+| `sft.py` | SFT trainer: the §7.1 loss, fixed-shape micro-batches, chat-token init, exact resume, best-dev tracking, greedy export, and `run_sweep` (the 7.6 loop). Imports helpers from `train.py` |
+| `raft_gpu_app.py` | Modal GPU launcher for 7.6 (and later 7.8); `--confirm` required |
 | `eval_forgetting.py` | the forgetting guards: CaseHOLD and the per-source held-out bits/byte subset (§8.2, §8.4); importable by the GPU container |
 | `eval_raft.py` | the RAFT metrics in §8.1 |
 | `smoke_raft.py` | the local checks: data helpers and the 7.2 core now, the SFT checks of 7.5 later |
@@ -1026,4 +1027,55 @@ an honest shortfall when no reviewed spare is left.
   - add the patterns above to G2 as prohibitions;
   - add a B2-specific check ("could a careful reader give a plausible answer, including by
     arithmetic or a partial statement?") before scaling.
+
+### 7.0–7.4 review before 7.5 (2026-10-16, $0)
+**A full re-check against the artifacts passed:**
+- **No document is shared** between train and dev/test, counting *every* passage in every context
+  (distractors included).
+- **All 1,211 dev/test oracles** come from the leak-scanned pool.
+- **The probe's 68 answer passages** never appear in any SFT train context.
+- **No trial source was reused.**
+- **All 3,999 examples meet the format contract:** ≤ 773 tokens, `<|eos|>` framing, the decision
+  token first, the cited k = the oracle, every quote verbatim.
+- **The 150 test pairs are intact.**
+- **Spend reconciles to $2.56.** 0 Modal containers.
+
+### 7.5 Local SFT smoke test: DONE (2026-10-16, $0)
+**Code:**
+- `eval_raft.py`: constrained decoding as a `LogitsProcessor` over HF batched `generate`, output
+  parsing, decision metrics/AUROC, and the §7.2 proxies.
+- `sft.py`: the trainer.
+- `raft_gpu_app.py`: the 7.6 launcher.
+
+**`smoke_raft.py --sft`: 53/53 checks**, plus 5 sweep checks with a tiny model.
+
+| Check | Result |
+|---|---|
+| Decision ids from the tokenizer | `Ġnone` 5494, `ĠPass` 12175, `age` 479, digits 307/393/421/559 |
+| Mask on 200 real examples | exactly decision token … final `<|eos|>` |
+| Loss vs a hand computation | 6.037719 = 6.037719 |
+| Same loss split into micro-batches | 6.037719 |
+| A pooled per-token mean would have given | 4.0106: the §7.1 flaw, avoided |
+| Chat-token init | pairwise cosine max 0.24; every other row untouched; output log-probs −21.5/−14.1/−19.3, below the trained p95 (−13.2) |
+| Overfit 32 examples | SFT loss **0.0001** after 180 steps |
+| Constrained generations | **8/8** reproduce the overfit targets exactly |
+| Hard kill at step 6, resume from step 4 | **bit-identical** to an uninterrupted run |
+| Sweep loop | in-place reload keeps the same Parameter objects (one compile for all runs); restart skips finished runs; budget guard stops |
+
+**Bugs the smoke test caught (all fixed):**
+- **`loss_sums` indexed SFT rows with the whole batch's mask.** It would have crashed on the GPU.
+- **HF `generate` inherited the base model's saved `min_new_tokens=16`.** That blocked `<|eos|>`
+  after the 15-token refusal, so the model repeated it. This is the export hazard flagged in the
+  review. Generation now uses an explicit greedy `GenerationConfig`.
+- **The resume fingerprint included cadence settings,** which would have blocked a legitimate
+  resume.
+- **After a resume, the export could ship the last weights instead of the best;** it now falls back
+  to `best.pt`.
+
+**Adjusted check (documented).** The chat-token criterion was "output log-prob ≤ the median trained
+token". A correct in-distribution sample lands near the median about half the time, so that test
+would fail at random. The check is now "does not dominate: below the trained p95".
+
+**Local limits.** The 8.6 GB Mac swaps heavily during CPU training (≈ 25 min for the suite). That's
+fine for the smoke test; all real training is on the GPU.
 

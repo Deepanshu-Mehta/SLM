@@ -332,6 +332,21 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   whose answer is one subtraction or one qualitative phrase away. Train B2 likely has similar noise.
   For 7.8: G2 prohibitions plus a B2-specific "plausible answer" check.
 
+### E-26 · Step 7.5 local SFT smoke test (2026-10-16, $0)
+- **53/53 checks pass, plus 5 sweep checks.**
+  - The loss equals a hand computation, and is identical when split into micro-batches. A pooled
+    mean would differ (4.01 vs 6.04).
+  - 32 examples overfit to 0.0001; generations reproduce them 8/8.
+  - A hard kill and resume is bit-identical.
+  - The chat rows are distinct (cosine ≤ 0.24).
+  - In-place reload keeps the Parameter objects, so the module compiles once.
+- **Bugs caught before any GPU spend:**
+  - SFT/replay mask slicing (would have crashed).
+  - Generation inherited `min_new_tokens=16` from the base model's config, making refusals repeat
+    instead of stopping.
+  - An over-strict resume fingerprint.
+  - Export after a resume could ship the last weights instead of the best.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

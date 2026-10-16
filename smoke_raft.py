@@ -6,6 +6,8 @@ Data checks run on real cleaned documents from `.smoke/reports/cleaning_examples
 from __future__ import annotations
 
 import json
+import time
+import os
 from collections import Counter
 import random
 import sys
@@ -299,6 +301,10 @@ def main() -> None:
     pipeline_checks(tok)
     teacher_output_checks(tok)
     pipeline_dry_run(tok)
+    if "--sft" in sys.argv or "--all" in sys.argv:
+        sft_checks(tok)
+    if "--sweep" in sys.argv or "--sft" in sys.argv or "--all" in sys.argv:
+        sweep_checks(tok)
     print(f"\n{'ALL CHECKS PASS' if not failures else f'{len(failures)} FAILED: {failures}'}")
     sys.exit(1 if failures else 0)
 
@@ -383,6 +389,206 @@ def pipeline_dry_run(tok) -> None:
         dups = sum(v.get("drop:duplicate_question", 0) for v in rep["funnel"].values())
         check("dry run: the one planted duplicate question is dropped, nothing else",
               dups == 1 and rep["funnel"]["gemini:G1"].get("drop:duplicate_question") == 1, f"{dups} dropped")
+
+
+
+# ================================================================= 7.5: SFT trainer checks
+def synthetic_rows(n: int = 32, seed: int = 0) -> list[dict]:
+    """Short, valid-format examples (3/4 answerable, 1/4 refusal) for fast CPU training tests."""
+    rng = random.Random(seed)
+    names = ["Acme", "Borel", "Cato", "Dunmore", "Elgin", "Fairfax", "Grafton", "Halden", "Ivers", "Jasper"]
+    rows = []
+    for i in range(n):
+        a, b = rng.sample(names, 2)
+        ya, yb = rng.randint(1990, 1999), rng.randint(1990, 1999)
+        ra, rb = rng.randint(2, 99), rng.randint(2, 99)
+        ps = [f"{a} Corp reported revenue of ${ra} million in {ya}.",
+              f"{b} Corp reported revenue of ${rb} million in {yb}."]
+        if i % 4 == 3:                                   # refusal: a company in neither passage
+            c = rng.choice([x for x in names if x not in (a, b)])
+            row = {"id": f"syn{i}", "bucket": "B1", "question": f"What revenue did {c} Corp report?",
+                   "passages": ps, "k": None}
+        else:
+            k = rng.randint(1, 2)
+            nm, rv, yr = (a, ra, ya) if k == 1 else (b, rb, yb)
+            row = {"id": f"syn{i}", "bucket": "A", "question": f"What revenue did {nm} Corp report?",
+                   "passages": ps, "k": k, "answer": f"${rv} million",
+                   "quote": f"revenue of ${rv} million in {yr}"}
+        row["prompt"], row["target"] = R.render_example(row)
+        rows.append(row)
+    return rows
+
+
+def sft_checks(tok) -> None:
+    import subprocess
+    import tempfile
+
+    import numpy as np
+    import torch
+
+    import eval_raft as E
+    import sft
+    from data import WindowStore
+
+    print("sft.py (7.5)")
+    dec = E.decision_ids(tok)
+    check("decision ids verified against the tokenizer", dec["none"] == 5494 and dec["pass"] == 12175,
+          f"{dec['none']} / {dec['pass']} / age {dec['age']} / digits {dec['digits']}")
+
+    # 1. masks on real pilot examples (§4.1 step 7)
+    real = json.loads("[" + ",".join(open(".smoke/raft/pilot/datasets/train.jsonl").read().splitlines()[:200]) + "]")
+    d = sft.tokenize(real, tok, config.SEQ_LEN)
+    ok = all(d.mask[i, d.decision_pos[i]:d.length[i]].all() and not d.mask[i, :d.decision_pos[i]].any()
+             and not d.mask[i, d.length[i]:].any() and d.ids[i, d.length[i] - 1] == 1
+             and d.ids[i, d.decision_pos[i]] == (dec["none"] if d.refusal[i] else dec["pass"])
+             for i in range(len(d)))
+    check("mask = exactly the target span (decision token .. final <|eos|>) on 200 real examples", ok,
+          f"max length {d.length.max()}")
+
+    # 2. the loss: hand-computed, and invariant to micro-batch splitting
+    torch.manual_seed(0)
+    raw = sft.load_init(TOKENIZER_DIR).eval()
+    syn = synthetic_rows(4)
+    L = 96                                            # synthetic examples are <= ~90 tokens
+    sd = sft.tokenize(syn, tok, L)
+    store = WindowStore.open(".smoke/tokens/train", config.SEQ_LEN)
+    rep = store.gather(np.array([5, 9]))[:, :L].astype(np.int64)
+    lam = 0.25
+    with torch.no_grad():
+        x = torch.from_numpy(np.concatenate([sd.ids, rep]))
+        mask = torch.from_numpy(np.concatenate([sd.mask, np.zeros_like(rep, dtype=bool)]))
+        r = sft.loss_sums(raw, x, 4, mask, dec)
+        n_sft, n_rep = int(sd.mask[:, 1:].sum()), rep.shape[0] * (L - 1)
+        impl = float(r["sft"] / n_sft + lam * r["rep"] / n_rep)
+        logp = torch.log_softmax(raw(input_ids=x).logits.float(), -1)
+        hand_sft = -sum(float(logp[i, t - 1, x[i, t]]) for i in range(4) for t in range(1, L) if sd.mask[i, t])
+        hand_rep = -sum(float(logp[4 + j, t - 1, x[4 + j, t]]) for j in range(2) for t in range(1, L))
+        hand = hand_sft / n_sft + lam * hand_rep / n_rep
+        split = 0.0
+        for rows_, reps_ in (((0, 1), (0,)), ((2, 3), (1,))):
+            xs = torch.cat([x[list(rows_)], x[[4 + j for j in reps_]]])
+            ms = torch.cat([mask[list(rows_)], mask[[4 + j for j in reps_]]])
+            rr = sft.loss_sums(raw, xs, 2, ms, dec)
+            split += float(rr["sft"] / n_sft + lam * rr["rep"] / n_rep)
+    check("loss = L_sft + 0.25 L_replay matches a hand computation (per-token, own counts)",
+          abs(impl - hand) < 1e-4 * max(1, abs(hand)), f"impl {impl:.6f} vs hand {hand:.6f}")
+    check("loss is invariant to splitting the global batch into micro-batches",
+          abs(impl - split) < 1e-4 * max(1, abs(impl)), f"split {split:.6f}")
+    pooled = (hand_sft + hand_rep) / (n_sft + n_rep)
+    check("documented flaw avoided: a pooled per-token mean would weight replay differently",
+          abs(pooled - impl) > 1e-3, f"pooled {pooled:.4f} vs ours {impl:.4f}")
+
+    # 3. chat-token init (§7.1)
+    before = raw.get_input_embeddings().weight.detach().clone()
+    stats = sft.init_chat_tokens(raw, 1337)
+    after = raw.get_input_embeddings().weight.detach()
+    untouched = torch.equal(torch.cat([before[:4], before[7:]]), torch.cat([after[:4], after[7:]]))
+    check("chat rows 4-6 re-initialised and distinct; every other row untouched",
+          stats["pairwise_cos_max"] < 0.5 and untouched and raw.lm_head.weight.data_ptr() == after.data_ptr(),
+          f"{stats}")
+    with torch.no_grad():
+        h = raw.model(input_ids=torch.from_numpy(rep)).last_hidden_state.float()
+        lse = torch.logsumexp(h @ after.float().T, -1, keepdim=True)
+        lp = (h @ after.float().T - lse).mean(dim=(0, 1))
+    trained = torch.ones(after.shape[0], dtype=torch.bool); trained[[0, 2, 3, 4, 5, 6]] = False
+    p95 = float(lp[trained].quantile(0.95))
+    check("chat rows do not dominate the output softmax (mean log-prob below the trained p95)",
+          float(lp[[4, 5, 6]].max()) < p95, f"rows 4-6 {[round(float(v), 2) for v in lp[[4, 5, 6]]]} vs p95 {p95:.2f}")
+
+    # 4. overfit 32 synthetic examples (§5.1: train loss < 0.05)
+    syn32 = synthetic_rows(32, seed=1)
+    td = sft.tokenize(syn32, tok, 96)
+    cfg = sft.RunConfig(lr=3e-4, epochs=30, seq_len=96, batch_sequences=8, micro=4, max_usd=0.0,
+                        log_every=1000, gpu="none", seed=1)
+    res = sft.train_one(cfg, raw, raw, td, None, store, dec, torch.device("cpu"), None, log=lambda *_: None)
+    with torch.no_grad():
+        x = torch.from_numpy(td.ids)
+        ls = sft.loss_sums(raw, x, len(td), torch.from_numpy(td.mask), dec)
+    final = float(ls["sft"]) / int(td.mask[:, 1:].sum())
+    check("32 examples overfit: train SFT loss < 0.05", final < 0.05, f"{final:.4f} after {res['steps']} steps")
+
+    # 5. constrained generations parse and match the overfit targets
+    gens = E.generate_batch(raw, tok, [r["prompt"] for r in syn32[:8]], [len(r["passages"]) for r in syn32[:8]],
+                            torch.device("cpu"), tau=0.5, max_new=40, batch=8)
+    parsed = [E.parse_output(g["text"]) for g in gens]
+    exact = sum(("Source:" + g["text"] + "<|eos|>") == ("Source:" + r["target"]) for g, r in zip(gens, syn32[:8]))
+    check("constrained generations parse; decisions right; overfit targets reproduced",
+          all(p["valid"] for p in parsed) and all(p["refusal"] == (r["bucket"] != "A") for p, r in zip(parsed, syn32[:8]))
+          and exact >= 7, f"{exact}/8 exact; e.g. {gens[0]['text'][:70]!r}")
+    del raw
+
+    # 6. hard kill mid-run, resume -> bit-identical to an uninterrupted run
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in synthetic_rows(24, seed=2)))
+        common = [sys.executable, "-m", "sft", "--train", str(tmp / "train.jsonl"), "--tokenizer-dir", TOKENIZER_DIR,
+                  "--init", TOKENIZER_DIR, "--tokens-dir", ".smoke/tokens/train", "--device", "cpu",
+                  "--seq-len", "96", "--batch-sequences", "8", "--micro", "4", "--epochs", "3",
+                  "--ckpt-every", "4", "--log-every", "1000", "--gpu", "none", "--max-usd", "0"]
+        env = {**os.environ, "TOKENIZERS_PARALLELISM": "false"}
+        ref = subprocess.run(common + ["--out", str(tmp / "ref")], capture_output=True, text=True, env=env)
+        crash = subprocess.run(common + ["--out", str(tmp / "crash"), "--die-after-step", "6"],
+                               capture_output=True, text=True, env=env)
+        resumed = subprocess.run(common + ["--out", str(tmp / "crash")], capture_output=True, text=True, env=env)
+        a = torch.load(tmp / "ref" / "ckpt.pt", weights_only=False)
+        b = torch.load(tmp / "crash" / "ckpt.pt", weights_only=False)
+        same = a["step"] == b["step"] and all(torch.equal(a["model"][k], b["model"][k]) for k in a["model"])
+        check("hard kill at step 6 (last checkpoint 4) then resume: weights bit-identical to an uninterrupted run",
+              ref.returncode == 0 and crash.returncode == 17 and resumed.returncode == 0 and same
+              and "[resume] step 4" in resumed.stdout,
+              f"rc {ref.returncode}/{crash.returncode}/{resumed.returncode}, final step {a['step']}/{b['step']}")
+
+
+
+def sweep_checks(tok) -> None:
+    """sft.run_sweep with a tiny 2-layer model: in-place reload keeps the same Parameter objects
+    (so a compiled module stays valid), runs are recorded and skipped on restart, budget stops."""
+    import tempfile
+
+    import torch
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    import eval_raft as E
+    import sft
+    from data import WindowStore
+
+    print("sft.run_sweep (7.6 logic, tiny model)")
+    torch.manual_seed(0)
+    tiny = LlamaForCausalLM(LlamaConfig(vocab_size=16384, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+                                        num_attention_heads=4, num_key_value_heads=4, max_position_embeddings=1024,
+                                        tie_word_embeddings=True, bos_token_id=0, eos_token_id=1, pad_token_id=2))
+    pool = synthetic_rows(96, seed=3)
+    cycle = iter(["B1", "B2", "B3"] * 20)
+    for i, r in enumerate(pool):                     # give the pool every bucket select_mix needs
+        r["bucket"] = next(cycle) if r["bucket"] != "A" else ("C" if i % 5 == 0 else "A")
+    dev = sft.tokenize(synthetic_rows(12, seed=4), tok, 96)
+    store = WindowStore.open(".smoke/tokens/train", config.SEQ_LEN)
+    base = {k: v.detach().clone() for k, v in tiny.state_dict().items()}
+    ids_before = [id(p) for p in tiny.parameters()]
+    cfg = sft.RunConfig(epochs=2, seq_len=96, batch_sequences=8, micro=4, log_every=10_000, gpu="none", max_usd=0.0)
+    grid = [{"n": 24, "lr": 1e-3, "refusal_share": 0.25}, {"n": 24, "lr": 5e-4, "refusal_share": 0.35}]
+    dec = E.decision_ids(tok)
+    with tempfile.TemporaryDirectory() as tmp:
+        res = Path(tmp) / "results.jsonl"
+        rows = sft.run_sweep(tiny, tiny, base, pool, dev, store, tok, dec, torch.device("cpu"), grid, res, cfg,
+                             log=lambda *_: None, gen_batch=12)
+        check("sweep: both runs recorded with dev and proxy metrics",
+              len(rows) == 2 and all("selection_score" in r and "dev_macro_f1" in r for r in rows),
+              f"{[r['key'] for r in rows]}")
+        check("sweep: in-place reload keeps the same Parameter objects (compiled module stays valid)",
+              [id(p) for p in tiny.parameters()] == ids_before)
+        t0 = time.time()
+        again = sft.run_sweep(tiny, tiny, base, pool, dev, store, tok, dec, torch.device("cpu"), grid, res, cfg,
+                              log=lambda *_: None)
+        check("sweep: a restart skips finished runs", len(again) == 2 and time.time() - t0 < 2.0,
+              f"{time.time() - t0:.2f}s")
+        stopped = sft.run_sweep(tiny, tiny, base, pool, dev, store, tok, dec, torch.device("cpu"),
+                                [{"n": 24, "lr": 2e-4, "refusal_share": 0.15}], Path(tmp) / "r2.jsonl", cfg,
+                                budget_ok=lambda: False, log=lambda *_: None)
+        check("sweep: the budget guard stops before a run", stopped == [])
+        b = sft.best_run(rows)
+        check("sweep: best_run picks the highest selection score",
+              b["selection_score"] == max(r["selection_score"] for r in rows))
 
 
 if __name__ == "__main__":

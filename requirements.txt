@@ -25,6 +25,10 @@ uvicorn[standard]==0.32.1
 # Phase 7 local tests (smoke_raft.py): BM25 retrieval
 bm25s==0.3.13
 
+# Phase 7 teacher / checker APIs (teacher.py): DeepSeek is OpenAI-compatible; Gemini Batch
+openai==3.31.0
+google-genai==2.31.0
+
 # Optional: reproduce Phase 2's LSH band/row choice; static checks
 datasketch==1.6.5
 pyflakes

@@ -449,17 +449,17 @@ Question: {question}
 ```
 
 **V2: task check** (DeepSeek, thinking off; bucket C only). For yes/no instructions the proposed
-response is omitted, so that check is blind.
+response is omitted, so that check is blind. The fixed text says "the passage" because `k` varies,
+which keeps the system prompt identical, and so cacheable, across requests.
 
 ```
 You check a training example for a model that must work only from the passages it is given.
-Using ONLY Passage {k} below:
+Using ONLY the passage below:
 - If the instruction is a yes/no question, answer it yourself: "Yes" or "No".
-- Otherwise, decide whether every factual claim in the proposed response is stated in Passage {k}
+- Otherwise, decide whether every factual claim in the proposed response is stated in the passage
   ("supported"), and whether the response does what the instruction asks ("on_task").
 
-Reply with JSON only: {"yes_no": "Yes" or "No" or null, "supported": bool or null,
-"on_task": bool or null}
+Reply with JSON only: {"yes_no": "Yes" or "No" or null, "supported": true or false or null, "on_task": true or false or null}
 
 Passage {k}: {passage}
 Instruction: {instruction}
@@ -587,6 +587,10 @@ Dev is used only for selection and τ.
   citing context, with an `<|eos|>` prefix, left-truncating to 1,024. Report **byte-length-
   normalised** accuracy (acc_norm, as in lm-eval-harness; token counts are tokenizer-specific) and
   unnormalised accuracy, against 20% chance, with 95% CIs.
+  **Added 2026-10-16 (E-21):** PMI accuracy, log P(holding | context) − log P(holding | "("),
+  because summed log-prob only tracks holding length (correct holdings are ~11% longer). If PMI is
+  also at chance, CaseHOLD cannot show forgetting (floor effect): it is then reported, and the
+  held-out bits/byte stays the forgetting guard. That decision goes to the user.
 - **Purpose:** a general legal-reasoning measure that moves independently of the RAFT format.
 
 The targets were set **before** seeing any results. If one is missed, the miss is recorded and
@@ -628,6 +632,8 @@ learning-curve check in §3.1 (more data or not).
 | `raft_data.py` | pure, unit-tested logic: chunking, passage filters, the split rule, prompt/target formatting, mechanical checks, output parsing, metrics |
 | `raft_app.py` | Modal: passage-pool fan-out (one worker per corpus shard, keeping the fan-out design), BM25 build, distractor mining, dataset assembly; SFT GPU entrypoints gated by `--confirm` |
 | `teacher.py` | local: concurrent DeepSeek calls (off-peak guard, retries, resumable JSONL) and Gemini batch jobs; spend ledger; keys read from `.env.local` and never logged |
+| `raft_prompts.py` | the §6 prompts, split into a fixed (cacheable) system part and a variable user part |
+| `raft_pipeline.py` | the local stage CLI: sources → generate → candidates → assemble → check → report; paid steps need `--confirm` |
 | `sft.py` | SFT trainer; imports helpers from `train.py`; its own loss (§7.1), per-source evaluation index lists, and a greedy `generation_config` written over `export_hf`'s |
 | `eval_forgetting.py` | the forgetting guards: CaseHOLD and the per-source held-out bits/byte subset (§8.2, §8.4); importable by the GPU container |
 | `eval_raft.py` | the RAFT metrics in §8.1 |
@@ -760,4 +766,34 @@ restarts.
 
 **Consequence beyond Phase 7 (E-20).** The base model's SEC held-out score (0.463 bits/byte) is
 optimistic: most SEC "held-out" text shares substantial n-grams with training filings.
+
+### 7.1 addendum: CaseHOLD sanity, 500 items on CPU (2026-10-16, $0)
+The full 3,600-item MPS run swapped the 8.6 GB Mac to 9.3 GB and stalled, so it was stopped and
+replaced by 500 items on CPU (26 min).
+
+| Metric | Value | 95% CI |
+|---|---|---|
+| acc (summed log-prob) | **0.122** | 0.096–0.154 (below chance 0.20) |
+| acc_norm (per byte) | **0.172** | 0.141–0.208 (chance) |
+
+- **Diagnosis:** correct holdings are longer (168 vs 152 characters). "Pick the shortest" scores
+  0.114 and "pick the longest" 0.246, so summed log-prob reduces to a length preference.
+- **The base model shows no zero-shot CaseHOLD skill.** PMI scoring was added. The official
+  numbers (all three, 3,600 items) are measured on the init weights in the GPU container.
+
+### 7.3 Code written and tested locally (no API calls yet)
+- **New files:** `raft_prompts.py`, `teacher.py`, `raft_pipeline.py`. `raft_app.py` gained
+  `select_train_sources`, `ContextBuilder`, `train_sources` and `assemble_source`.
+- **`smoke_raft.py`: 42/42.** Coverage:
+  - quote re-cut (curly vs straight quotes) and elided quotes;
+  - name / Yes-No / leading-"The" exemptions, copied questions, hedges;
+  - list and yes/no tasks; answer agreement;
+  - the first target token is `Ġnone` / `ĠPass`, with segment encoding equal to whole-string
+    encoding;
+  - the context rules (oracle at k, no adjacent chunk, ≤ 2 same-document passages, one per other
+    document, no near-duplicates, task names its passage, ≤ 1,024 tokens, deterministic);
+  - a mocked end-to-end dry run of candidates → assemble → report (the planted duplicate is dropped,
+    and the thinking agreement is computed correctly).
+- **Guards tested:** the peak-hour guard (Fri 02:30 and 07:30 UTC peak; 05:30, 12:30 and Sat
+  off-peak). The ledger refuses an over-cap reservation and persists across runs.
 

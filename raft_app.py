@@ -221,6 +221,141 @@ def build_bm25(rows: list[dict], out_dir: Path | None, probes: int = 500,
             "probes": len(targets), "top1_hit_rate": hit / max(1, len(targets))}
 
 
+def select_train_sources(rows_by_source: dict[str, list[dict]], n: int, plan: dict[str, float],
+                         exclude: set[str] = frozenset(), seed: int = config.RAFT.seed) -> list[dict]:
+    """Source passages for generation from the train pool: 40/40/20 by source, one per
+    document, documents with >= 4 chunks (so same-document distractors exist), SEC numeric
+    quota filled first (~10%). `plan` maps generator kind (G1/G2/G3) to its share."""
+    import random
+
+    rng = random.Random(seed)
+    picked: list[dict] = []
+    for source, share in config.RAFT.source_mix:
+        want = round(n * share)
+        pool = [r for r in rows_by_source[source]
+                if r["elig"] and r["n_chunks"] >= 4 and r["pid"] not in exclude]
+        rng.shuffle(pool)
+        used_docs: set[str] = set()
+        quota = round(want * 0.10) if source == "sec" else 0
+        got: list[dict] = []
+        for group, limit in (([r for r in pool if r["elig"] == "numeric"], quota),
+                             ([r for r in pool if r["elig"] == "clean"], want)):
+            taken = 0
+            for r in group:
+                if len(got) >= want or taken >= limit:
+                    break
+                if r["doc"] in used_docs:
+                    continue
+                used_docs.add(r["doc"])
+                got.append(r)
+                taken += 1
+        picked.extend(got)
+    rng.shuffle(picked)
+    kinds = [k for k, f in plan.items() for _ in range(round(f * len(picked)))]
+    kinds = (kinds + ["G1"] * len(picked))[:len(picked)]
+    tasks = ("summarize", "extract_list", "yes_no_check")
+    g3 = 0
+    out = []
+    for r, kind in zip(picked, kinds):
+        row = {"pid": r["pid"], "doc": r["doc"], "source": r["pid"].split("/")[0], "split": "train",
+               "elig": r["elig"], "text": r["text"], "kind": kind}
+        if kind == "G3":
+            row["task"] = tasks[g3 % 3]
+            g3 += 1
+        out.append(row)
+    return out
+
+
+class ContextBuilder:
+    """Builds the 4-passage contexts of §4.1 step 4 for one (split, source) pool."""
+
+    def __init__(self, rows: list[dict], retriever, pids: list[str], tokenizer,
+                 seed: int = config.RAFT.seed):
+        import raft_data as R
+
+        self.R, self.tok, self.seed = R, tokenizer, seed
+        self.by_pid = {r["pid"]: r for r in rows}
+        self.by_doc: dict[str, list[dict]] = defaultdict(list)
+        for r in rows:
+            self.by_doc[r["doc"]].append(r)
+        self.retriever, self.pids = retriever, pids
+        self._sh: dict[str, set] = {}
+
+    def shingles(self, row: dict) -> set:
+        if row["pid"] not in self._sh:
+            self._sh[row["pid"]] = set(self.R.ngram_hash_list(self.R.word_list(row["text"]), 5))
+        return self._sh[row["pid"]]
+
+    def distractors(self, oracle: dict, query: str, n: int, rng) -> list[dict] | None:
+        import bm25s
+
+        cfg = config.RAFT
+        ok = lambda r: self.R.jaccard(self.shingles(r), self.shingles(oracle)) <= cfg.oracle_jaccard_max
+        same = [r for r in self.by_doc[oracle["doc"]] if abs(r["chunk"] - oracle["chunk"]) >= 2]
+        rng.shuffle(same)
+        n_same = min(rng.choice([1, 2]), cfg.same_doc_distractors_max, n)
+        picks = [r for r in same if ok(r)][:n_same]
+        docs, _ = self.retriever.retrieve(bm25s.tokenize([query], stopwords="en", show_progress=False),
+                                          k=60, show_progress=False)
+        used_docs, valid = {oracle["doc"]}, []
+        for idx in docs[0]:
+            r = self.by_pid[self.pids[int(idx)]]
+            if r["doc"] in used_docs or not ok(r):
+                continue
+            used_docs.add(r["doc"])
+            valid.append(r)
+            if len(valid) >= cfg.bm25_sample_top:
+                break
+        need = n - len(picks)
+        if len(valid) < need:
+            return None
+        return picks + rng.sample(valid, need)
+
+    def build(self, cand: dict) -> tuple[dict | None, str]:
+        """Assemble one candidate: (row, "") or (None, drop reason)."""
+        import random
+        import re
+
+        R = self.R
+        rng = random.Random(f"{self.seed}:{cand['cid']}")
+        oracle = self.by_pid[cand["source_pid"]]
+        bucket = cand["bucket"]
+        query = cand.get("question") or cand.get("instruction")
+        n = 4 if bucket == "B1" else 3
+        d = self.distractors(oracle, query, n, rng)
+        if d is None:
+            return None, "too_few_distractors"
+        rows = d if bucket == "B1" else d + [oracle]
+        rng.shuffle(rows)
+        k = rows.index(oracle) + 1 if bucket in ("A", "C", "B2") else None
+        passages = [r["text"] for r in rows]
+        if bucket == "A":
+            prompt = R.format_prompt(passages, question=cand["question"])
+            target = R.format_target(k, cand["answer"], quote=cand["quote"])
+        elif bucket in ("B1", "B2"):
+            prompt = R.format_prompt(passages, question=cand["question"])
+            target = R.format_target(None)
+        else:
+            task = re.sub(r"\bthe passage\b", f"Passage {k}", cand["instruction"], count=1, flags=re.I)
+            cand = {**cand, "task_text": task}
+            prompt = R.format_prompt(passages, task=task)
+            if cand["task"] == "yes_no_check":
+                target = R.format_target(k, f"{cand['yes_no']}.", quote=cand["quote"])
+            else:
+                target = R.format_target(k, cand["response"])
+        n_tokens = len(self.tok.encode(prompt + target, add_special_tokens=False))
+        if n_tokens > config.SEQ_LEN:
+            return None, "too_long"
+        names = {w.strip(".,;:?!()\"'").lower() for i, w in enumerate((query or "").split())
+                 if i and w[:1].isupper()}
+        joined = " ".join(passages).lower()
+        label = "answerable" if bucket in ("A", "C") else "unanswerable"
+        return {**cand, "passages": passages, "pids": [r["pid"] for r in rows], "k": k,
+                "label": label, "n_tokens": n_tokens,
+                "n_same_doc": sum(r["doc"] == oracle["doc"] for r in rows) - (k is not None),
+                "entity_present": bool(names) and any(nm and nm in joined for nm in names)}, ""
+
+
 # ================================================================== Modal wrappers
 def _tokenizer():
     from transformers import AutoTokenizer
@@ -315,6 +450,52 @@ def prepare_driver() -> dict:
     (RAFT / "reports" / "7.2.json").write_text(json.dumps(report, indent=2, default=dict))
     volume.commit()
     return json.loads(json.dumps(report, default=dict))
+
+
+# ------------------------------------------------------- 7.3+ sources and assembly
+def _pool_rows(split: str, source: str) -> list[dict]:
+    return [r for f in sorted((RAFT / "passages" / split / source).glob("*.jsonl")) for r in _jsonl(f)]
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 30, cpu=2.0, memory=16_384)
+def train_sources(stage: str, n: int, plan: dict, exclude_stages: list[str] = ()) -> dict:
+    """Pick n train source passages for a stage; writes raft/{stage}/sources.jsonl."""
+    t0 = time.time()
+    exclude = {r["pid"] for st in exclude_stages if (RAFT / st / "sources.jsonl").exists()
+               for r in _jsonl(RAFT / st / "sources.jsonl")}
+    rows = {s: _pool_rows("train", s) for s in SOURCES}
+    out = select_train_sources(rows, n, plan, exclude)
+    _write_jsonl(RAFT / stage / "sources.jsonl", out)
+    volume.commit()
+    return {"rows": out, "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 16.0}
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 60, cpu=2.0, memory=16_384)
+def assemble_source(stage: str, split: str, source: str) -> dict:
+    """Contexts for every candidate of one (split, source) in raft/{stage}/candidates.jsonl."""
+    import bm25s
+
+    t0 = time.time()
+    volume.reload()
+    cands = [c for c in _jsonl(RAFT / stage / "candidates.jsonl")
+             if c["source"] == source and c["split"] == split]
+    if not cands:
+        return {"split": split, "source": source, "assembled": 0, "drops": {},
+                "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 16.0}
+    idx_dir = RAFT / "bm25" / f"{split}-{source}"
+    builder = ContextBuilder(_pool_rows(split, source), bm25s.BM25.load(str(idx_dir)),
+                             json.loads((idx_dir / "pids.json").read_text()), _tokenizer())
+    out, drops = [], Counter()
+    for c in cands:
+        row, why = builder.build(c)
+        if row is None:
+            drops[why] += 1
+        else:
+            out.append(row)
+    _write_jsonl(RAFT / stage / f"assembled-{split}-{source}.jsonl", out)
+    volume.commit()
+    return {"split": split, "source": source, "assembled": len(out), "drops": dict(drops),
+            "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 16.0}
 
 
 # ------------------------------------------------- 7.2 diagnostics (after the first run)

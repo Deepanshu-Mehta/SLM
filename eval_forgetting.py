@@ -2,8 +2,10 @@
 
 1. CaseHOLD (LexGLUE `case_hold`, test split, 3,600 items): zero-shot, each of the five
    candidate holdings scored by its log-likelihood after the citing context. Reports
-   accuracy by total log-prob (acc) and by log-prob per UTF-8 byte (acc_norm, as in
-   lm-eval-harness; token counts are tokenizer-specific), with Wilson 95% intervals.
+   accuracy by total log-prob (acc; biased: correct holdings are ~11% longer, so it tracks
+   "pick the shortest", E-21), by log-prob per UTF-8 byte (acc_norm, as in lm-eval-harness)
+   and by PMI (log P(holding | context) - log P(holding | "(")), which cancels length and
+   phrasing priors. Wilson 95% intervals.
 2. Held-out bits/byte on a fixed, seeded subset of validation windows: the same number of
    windows from each source's `-000` shard, each source scored with its OWN bytes/token
    (EXPERIMENTS C-05), plus a pooled figure.
@@ -35,6 +37,7 @@ CASEHOLD_ROWS_URL = ("https://datasets-server.huggingface.co/rows?dataset=coasta
                      "&config=case_hold&split=test&offset={offset}&length={length}")
 CASEHOLD_TEST_ROWS = 3_600
 PLACEHOLDER = "<HOLDING>"
+NULL_PREFIX = "("            # context-free premise for PMI: holdings follow "(" in citations
 SOURCES = tuple(name for name, _ in config.RAFT.source_mix)
 
 Autocast = Callable[[], contextlib.AbstractContextManager]
@@ -110,14 +113,20 @@ def score_casehold(net, tok, items: list[dict], device: torch.device,
     """Zero-shot CaseHOLD accuracy (acc and byte-normalised acc_norm)."""
     net.eval()
     weight = net.get_output_embeddings().weight
-    hits = hits_norm = 0
+    hits = hits_norm = hits_pmi = 0
     for b in range(0, len(items), items_per_batch):
         batch = items[b:b + items_per_batch]
         seqs, starts, nbytes = [], [], []
+        # 5 endings with the citing context, then the same 5 after a context-free "(" (PMI)
         for it in batch:
             prefix = it["context"].split(PLACEHOLDER)[0]
             for ending in it["endings"]:
                 ids, start = _continuation_ids(tok, prefix, ending, config.SEQ_LEN)
+                seqs.append(ids)
+                starts.append(start)
+                nbytes.append(len(ending.encode("utf-8")))
+            for ending in it["endings"]:
+                ids, start = _continuation_ids(tok, NULL_PREFIX, ending, config.SEQ_LEN)
                 seqs.append(ids)
                 starts.append(start)
                 nbytes.append(len(ending.encode("utf-8")))
@@ -136,13 +145,16 @@ def score_casehold(net, tok, items: list[dict], device: torch.device,
             targets = x[i, pos + 1]
             scores.append(float(logp.gather(1, targets[:, None]).sum()))
         for j, it in enumerate(batch):
-            s = scores[5 * j:5 * j + 5]
-            nb = nbytes[5 * j:5 * j + 5]
+            s = scores[10 * j:10 * j + 5]
+            null = scores[10 * j + 5:10 * j + 10]
+            nb = nbytes[10 * j:10 * j + 5]
             hits += int(np.argmax(s)) == it["label"]
             hits_norm += int(np.argmax([v / n for v, n in zip(s, nb)])) == it["label"]
+            hits_pmi += int(np.argmax([v - u for v, u in zip(s, null)])) == it["label"]
     n = len(items)
     return {"n": n, "acc": hits / n, "acc_ci95": wilson(hits, n),
-            "acc_norm": hits_norm / n, "acc_norm_ci95": wilson(hits_norm, n), "chance": 0.2}
+            "acc_norm": hits_norm / n, "acc_norm_ci95": wilson(hits_norm, n),
+            "acc_pmi": hits_pmi / n, "acc_pmi_ci95": wilson(hits_pmi, n), "chance": 0.2}
 
 
 # -------------------------------------------------------------------- held-out bits/byte

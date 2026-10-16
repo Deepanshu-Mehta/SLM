@@ -254,6 +254,21 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Local MPS limits:** a full CaseHOLD run on the 8.6 GB Mac swapped to 9.3 GB and stalled. It was
   stopped; the official baselines are measured in the GPU container.
 
+### E-21 · CaseHOLD zero-shot sanity on the base model (2026-10-16)
+- **Data:** 500 test items on CPU, scored in fp32 from the released bf16 weights.
+
+  | Metric | Value | 95% CI |
+  |---|---|---|
+  | acc (summed log-prob) | **0.122** | 0.096–0.154 |
+  | acc_norm (per byte) | **0.172** | 0.141–0.208 |
+
+- **Below chance is a length artifact.** Correct holdings average 168 characters against 152 for
+  the wrong ones. "Pick the shortest" scores 0.114 and "pick the longest" 0.246 on all 3,600 items.
+- **Conclusion:** the base model has no zero-shot CaseHOLD skill, which is expected at 125M.
+  - PMI scoring was added to `eval_forgetting.py`.
+  - If PMI is also at chance, CaseHOLD can't detect forgetting, and held-out bits/byte stays the
+    guard (the user decides).
+
 ## Decision log
 
 | ID | Date | Decision | Why |

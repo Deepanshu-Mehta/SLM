@@ -253,6 +253,9 @@ class TeacherConfig:
     peak_hours_utc: tuple[tuple[int, int], ...] = ((1, 4), (6, 10))
     checker_batch_in: float = 0.375
     checker_batch_out: float = 1.875
+    # thinking: DeepSeek effort when a check thinks (refusal labels, dev/test); Gemini level
+    check_thinking_effort: str = "low"
+    checker_thinking: str = "low"
     # per-request output caps (bound the worst case, §5.5)
     max_tokens_generate: int = 600
     max_tokens_check: int = 250

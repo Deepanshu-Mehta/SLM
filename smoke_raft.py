@@ -602,6 +602,31 @@ def sweep_checks(tok) -> None:
         check("sweep: best_run picks the highest selection score",
               b["selection_score"] == max(r["selection_score"] for r in rows))
 
+    # 7.6b plumbing: per-epoch extra eval (held-out bits/byte on GPU) at a changed replay weight
+    tiny.load_state_dict(base)
+    sft.init_chat_tokens(tiny, cfg.seed)
+    train = sft.tokenize(sft.select_mix(pool, 24, 0.35, cfg.seed), tok, 96)
+    calls = []
+    extra = lambda: (calls.append(1), {"heldout_pooled_bpb": 0.7 + 0.01 * len(calls)})[1]
+    r = sft.train_one(sft.RunConfig(**{**sft.asdict(cfg), "replay_weight": 1.0}), tiny, tiny, train, dev, store, dec,
+                      torch.device("cpu"), None, log=lambda *_: None, extra_eval=extra)
+    spe = r["plan"]["steps_per_epoch"]
+    check("7.6b: extra_eval runs once per epoch and lands in history and best",
+          len(calls) == cfg.epochs and [h["step"] for h in r["history"]] == [spe * (i + 1) for i in range(cfg.epochs)]
+          and all("heldout_pooled_bpb" in h for h in r["history"]) and "heldout_pooled_bpb" in r["best"],
+          f"{len(calls)} calls, steps {[h['step'] for h in r['history']]}")
+    tiny.load_state_dict(r["best_state"])
+    rows8 = synthetic_rows(8, seed=5)
+    gens = E.generate_batch(tiny, tok, [x["prompt"] for x in rows8], [len(x["passages"]) for x in rows8],
+                            torch.device("cpu"), tau=0.0, max_new=48, batch=8,
+                            copy_passages=[x["passages"] for x in rows8])
+    quotes = [(E.parse_output(g["text"]), x["passages"]) for g, x in zip(gens, rows8)]
+    check("7.6b: copy-constrained generation runs through generate_batch (plumbing only: a random tiny model "
+          "rarely parses; quote validity is unit-tested in eval checks and was measured on the real model)",
+          len(gens) == 8 and all(p["quote"] in ps[p["k"] - 1] for p, ps in quotes
+                                 if p["valid"] and not p["refusal"] and p["quote"] and p["k"] and p["k"] <= len(ps)),
+          f"{sum(p['valid'] for p, _ in quotes)}/8 parsed")
+
 
 if __name__ == "__main__":
     main()

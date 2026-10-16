@@ -1,6 +1,7 @@
 """Phase 7 GPU steps on Modal (docs/08-raft.md §5, §7). Nothing here runs without --confirm.
 
     modal run --detach raft_gpu_app.py::sweep --confirm [--max-usd 4]      # step 7.6, 1 x H100
+    modal run --detach raft_gpu_app.py::lambda_check --confirm --max-usd 1.5   # step 7.6b, 1 x H100
 
 One container does the whole pilot sweep:
   1. stage the train token shards on local disk (replay windows are random 2 KB reads);
@@ -39,6 +40,7 @@ RUN_DIR = Path(config.RAFT_DIR) / "runs" / "pilot"
 DATA_DIR = Path(config.RAFT_DIR) / "datasets" / "pilot"
 CASEHOLD = Path(config.RAFT_DIR) / "eval" / "casehold_test.jsonl"
 LOCAL_TRAIN = "/tmp/tokens/train"
+SPENT_76_USD = 1.37        # measured 7.6 spend incl. the two failed launches (docs/08-raft.md §13)
 
 
 def _rate_per_s() -> float:
@@ -143,6 +145,111 @@ def pilot_sweep(max_usd: float, compile: bool = True) -> dict:
     volume.commit()
     log(f"done: best {best['key']} score {best['selection_score']:.3f}; bpb delta {pooled_delta:+.4f}")
     return report
+
+
+@app.function(image=gpu_image, gpu=f"{config.SFT.gpu}:{config.SFT.gpu_count}", volumes=VOLUMES,
+              timeout=60 * 45, cpu=8.0, memory=32_768)
+def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int, compile: bool = True) -> dict:
+    """Step 7.6b: the forgetting fix. The pilot's selected setting at several (LR, replay weight)
+    arms, with held-out bits/byte after EVERY epoch (the forgetting slope, to project to 7.8's
+    longer run), CaseHOLD PMI at the best epoch, and dev proxies with plain and copy-constrained
+    decoding. Results are appended per arm, so a restarted container skips finished arms."""
+    import torch
+    from transformers import AutoTokenizer
+
+    import eval_forgetting as EF
+    import eval_raft as E
+    import sft
+    from data import WindowStore
+    from train import autocast
+
+    t0 = time.time()
+    spent = lambda: (time.time() - t0 + 60.0) * _rate_per_s()
+    out_dir = Path(config.RAFT_DIR) / "runs" / "pilot_lambda"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log = lambda m: print(f"[{time.time() - t0:7.0f}s ${spent():.2f}] {m}", flush=True)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    device = torch.device("cuda")
+    ac = lambda: autocast(device)
+    shutil.copytree(config.TRAIN_TOKENS_DIR, LOCAL_TRAIN, dirs_exist_ok=True)
+    store = WindowStore.open(LOCAL_TRAIN, config.SEQ_LEN)
+    tok = AutoTokenizer.from_pretrained(config.TOKENIZER_DIR)
+    dec = E.decision_ids(tok)
+    pool = sft.load_rows(DATA_DIR / "train.jsonl")
+    dev = sft.tokenize(sft.load_rows(DATA_DIR / "dev.jsonl"), tok, config.SEQ_LEN)
+    raw = sft.load_init(config.RAFT_INIT_CKPT).to(device)
+    base_state = {k: v.detach().clone() for k, v in raw.state_dict().items()}
+    val_dir = Path(config.VAL_TOKENS_DIR)
+    subset = EF.heldout_subset(val_dir)
+    items = [json.loads(ln) for ln in CASEHOLD.read_text().splitlines() if ln.strip()]
+    base = json.loads((RUN_DIR / "guards_base.json").read_text())
+    log(f"staged; base pooled bpb {base['heldout']['pooled_bpb']:.4f}, casehold PMI {base['casehold']['acc_pmi']:.3f}")
+    net = torch.compile(raw) if compile else raw
+    res_path = out_dir / "results.jsonl"
+    done = {json.loads(ln)["key"] for ln in res_path.read_text().splitlines() if ln.strip()} if res_path.exists() else set()
+    run_cost = 240 * _rate_per_s()
+    rows = []
+    for arm in arms:
+        lr, lam = arm["lr"], arm["lambda"]
+        key = f"lr{lr:g}-lam{lam:g}"
+        if key in done:
+            continue
+        if spent() + run_cost > max_usd:
+            log(f"budget reached before {key}")
+            break
+        t1 = time.time()
+        raw.load_state_dict(base_state)
+        sft.init_chat_tokens(raw, config.SFT.seed)
+        train = sft.tokenize(sft.select_mix(pool, n, refusal_share, config.SFT.seed), tok, config.SEQ_LEN)
+        cfg = sft.RunConfig(lr=lr, epochs=config.SFT.pilot_max_epochs, replay_weight=lam, gpu=config.SFT.gpu,
+                            max_usd=max_usd, log_every=10_000)
+        bpb = lambda: {"heldout_pooled_bpb": EF.heldout_bpb(raw, tok, val_dir, subset, device, ac, batch=16)["pooled_bpb"]}
+        res = sft.train_one(cfg, raw, net, train, dev, store, dec, device, None, log=lambda *_: None, extra_eval=bpb)
+        raw.load_state_dict(res["best_state"])
+        ch = EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16)
+        prompts, ks = [r["prompt"] for r in dev.rows], [len(r["passages"] or []) for r in dev.rows]
+        plain = E.proxy_metrics(dev.rows, E.generate_batch(raw, tok, prompts, ks, device, tau=0.5, batch=64, autocast=ac))
+        copy = E.proxy_metrics(dev.rows, E.generate_batch(raw, tok, prompts, ks, device, tau=0.5, batch=64, autocast=ac,
+                                                          copy_passages=[r["passages"] or [] for r in dev.rows]))
+        best = res["best"]
+        row = {"key": key, "lambda": lam, "lr": lr, "refusal_share": refusal_share, "n": n,
+               "best_step": best["step"], "steps_per_epoch": res["plan"]["steps_per_epoch"],
+               "best_dev_macro_f1": best["dev_macro_f1"], "best_dev_auroc": best["dev_auroc"],
+               "bpb_delta_at_best": best["heldout_pooled_bpb"] - base["heldout"]["pooled_bpb"],
+               "casehold_pmi": ch["acc_pmi"], "casehold_pmi_delta_points": 100 * (ch["acc_pmi"] - base["casehold"]["acc_pmi"]),
+               "history": [{"step": h["step"], "macro_f1": h["dev_macro_f1"],
+                            "bpb_delta": h["heldout_pooled_bpb"] - base["heldout"]["pooled_bpb"]} for h in res["history"]],
+               "plain": plain, "copy": copy, "seconds": round(time.time() - t1, 1)}
+        with res_path.open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
+        volume.commit()
+        rows.append(row)
+        log(f"{key}: best step {best['step']} macroF1 {best['dev_macro_f1']:.3f} | bpb delta {row['bpb_delta_at_best']:+.4f} "
+            f"| casehold PMI {ch['acc_pmi']:.3f} ({row['casehold_pmi_delta_points']:+.1f}) | score plain {plain['selection_score']:+.3f} "
+            f"copy {copy['selection_score']:+.3f} ({row['seconds']}s)")
+    all_rows = [json.loads(ln) for ln in res_path.read_text().splitlines() if ln.strip()]
+    return {"results": all_rows, "spent_usd": spent(), "wall_seconds": time.time() - t0}
+
+
+@app.local_entrypoint()
+def lambda_check(confirm: bool = False, max_usd: float = 1.5):
+    """Step 7.6b (paid: 1 x H100). Requires --confirm; draws on the 7.6 cap."""
+    if not confirm:
+        raise SystemExit("Step 7.6b uses a GPU and costs money. Re-run with --confirm once approved.")
+    left = config.RAFT_STAGE_CAPS_USD["7.6-pilot-gpu"] - SPENT_76_USD
+    if max_usd > left:
+        raise SystemExit(f"--max-usd {max_usd} exceeds what is left of the 7.6 cap (${left:.2f})")
+    best = json.loads(Path(".smoke/raft/pilot/sweep_report.json").read_text())["best"]   # the 7.6 selection
+    arms = [{"lr": lr, "lambda": lam} for lr, lam in config.SFT.forgetting_arms]
+    print(f"7.6b at n {best['n']}, refusal share {best['refusal_share']}: {arms}")
+    rep = lambda_sweep.remote(max_usd, arms, best["refusal_share"], best["n"])
+    out = Path(".smoke/raft/pilot/lambda_report.json")
+    out.write_text(json.dumps(rep, indent=2, default=str))
+    for r in rep["results"]:
+        print(f"{r['key']}: bpb delta {r['bpb_delta_at_best']:+.4f} casehold {r['casehold_pmi_delta_points']:+.1f} "
+              f"score plain {r['plain']['selection_score']:+.3f} copy {r['copy']['selection_score']:+.3f}")
+    print(f"spent ${rep['spent_usd']:.2f} -> {out}")
 
 
 @app.local_entrypoint()

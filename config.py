@@ -285,6 +285,9 @@ class SFTConfig:
     sweep_lrs: tuple[float, ...] = (5e-5, 1e-4, 2e-4)
     sweep_refusal_shares: tuple[float, ...] = (0.15, 0.25, 0.35)
     curve_sizes: tuple[int, ...] = (500, 1_000)
+    # 7.6b forgetting follow-up, (lr, replay weight) at the selected 35% refusal share: the selected LR
+    # at lambda 0.25 / 0.5 (pre-registered remedy) / 1.0, and the runner-up LR at the remedy weight.
+    forgetting_arms: tuple[tuple[float, float], ...] = ((2e-4, 0.25), (2e-4, 0.5), (2e-4, 1.0), (5e-5, 0.5))
     pilot_size: int = 2_000
     min_lr_fraction: float = 0.10
     warmup_fraction: float = 0.03

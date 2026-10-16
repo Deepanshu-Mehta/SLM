@@ -347,6 +347,33 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   - An over-strict resume fingerprint.
   - Export after a resume could ship the last weights instead of the best.
 
+### E-27 · Step 7.6 pilot sweep on 1 × H100 (2026-10-16/17, ≈ $1.37 of the $4 cap)
+- **Launches.** Three. The first two failed before training: a KeyError on the cap ($0), then a CPU/CUDA
+  device mismatch in `init_chat_tokens` (≈ $0.18). Both fixed. The third completed in 880 s ($1.19);
+  0 containers afterwards.
+- **Official baselines** (fp32 init, bf16): held-out pooled **0.7090** bits/byte; CaseHOLD acc 0.121 /
+  acc_norm 0.177 / **PMI 0.598**. PMI is well above chance, so CaseHOLD is an informative guard.
+- **Grid** (9 runs at 2,000 examples, best epoch of ≤ 8 by dev macro-F1, proxies at τ 0.5):
+  - **Selected: LR 2e-4, refusal 35%** (score −0.423, grounded 0.102, hallucination 0.445, macro-F1
+    0.864, best epoch 5).
+  - Highest macro-F1: LR 5e-5 / 25% (0.887, AUROC 0.937).
+- **Learning curve** at the selected setting: score −0.730 / −0.566 / −0.423 at 500 / 1,000 / 2,000
+  examples. Still climbing, so 10K is justified.
+- **τ** (teacher-forced): AUROC 0.934; macro-F1 0.851 at τ 0.5, best 0.872 at τ 0.7.
+- **Forgetting guards FAILED.**
+  - Pooled bits/byte +0.0314 (limit +0.02): case law +0.031, SEC +0.028, web +0.036.
+  - CaseHOLD PMI −4.4 points (limit −2), CIs disjoint.
+  - acc and acc_norm moved < 0.5 points; they only track length.
+- **Low grounded accuracy is invented quotes.** On 40 dev A items, 17 quotes weren't from the passage
+  and 8 were near-verbatim; only 3 were correct.
+  - Copy-constrained decoding (`CopyConstraint`) on 80 dev items: grounded 0.075 → 0.200,
+    hallucination 0.450 → 0.163, score −0.550 → −0.137. Decisions identical (80/80).
+  - The leftover error is wrong-span selection (17 of 40 A items quote a real but wrong sentence).
+- **Bug caught** before the third launch: `proxy_metrics` let a malformed answer on an unanswerable
+  item count as neither answer nor refusal. It now uses the constrained decision; unit-tested.
+- **Follow-up planned (7.6b, needs approval).** Per-epoch held-out bits/byte for 4 (LR, λ) arms, to
+  project forgetting to 7.8's 579 steps. Pre-registered rule in `docs/08-raft.md` §13.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -371,6 +398,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-18 | 10-16 | Keep the 10% leak rule; build the dev/test pool only from leak-scanned passages (SEC per-document cap 3, numeric quota filled first); record the SEC BM25 top-1 check as failed-and-explained (top-10 recall 99.6%) | E-20: relaxing the rule would let near-copies of training filings into the test; enough clean SEC passages exist |
 | D-19 | 10-16 | After the 7.3 trial: DeepSeek stays the writer; DeepSeek checks run **without thinking** (`TEACHER.think_on_refusal_checks = False`); answer agreement is symmetric containment | Pre-registered rules (E-22). Thinking's extra rejections were mostly "ambiguous" flags, and Gemini sided with thinking-off on 10 of 16 |
 | D-20 | 10-16 | Dev/test near misses must pass a manual read under the sharpened rule (drop if stated/computable/partial/underspecified; keep different-item hard negatives); dev accepts a 1-item B2 shortfall rather than lowering the bar | E-25. The user chose the $0 full read over accepting ~5–10% noise in the numbers that define results |
+| D-21 | 10-17 | Pilot selection LR 2e-4 / refusal 35% (pre-registered rule: best selection score). Report every proxy and the final test under **both** plain and copy-constrained decoding; recommend copy-constrained for serving. τ 0.7 is provisional until 7.7 | E-27: copying is the dominant failure (score −0.550 → −0.137 on 80 dev items, decisions unchanged); the constraint costs nothing at training time |
 
 ## Corrections log
 

@@ -1094,3 +1094,138 @@ fine for the smoke test; all real training is on the GPU.
     ~95 s per run);
   - the replay-ratio wording is corrected (≈ 1 per 4.3 rows; the loss share is unchanged at ≈ 20%).
 
+### 7.6 Pilot sweep: DONE, with two failed guards (2026-10-16/17, ≈ $1.37 of the $4 cap)
+**Three launches.**
+1. **KeyError on the 7.6 cap**, before any GPU was requested. A trailing comment from the 7.4 cap
+   edit had swallowed the key; fixed, and a config check was added.
+2. **Device mismatch in `init_chat_tokens`** (CPU generator vs CUDA tensors), after the official
+   baselines; ≈ $0.18. Fixed (CPU float64). The sweep path now also passes on MPS.
+3. **Completed** in 880 s, $1.19 by the container's meter; 0 containers afterwards.
+
+Also fixed before the third launch: `proxy_metrics` now takes answer/refuse from the constrained
+decision, so a malformed answer on an unanswerable item counts as hallucination.
+
+**Official baselines** (init weights, bf16, 1 × H100):
+- held-out pooled **0.7090** bits/byte (local sanity 0.7089);
+- CaseHOLD acc 0.121 / acc_norm 0.177 / **PMI 0.598** (CI 0.582–0.614).
+- **PMI shows the base model does use the citing context.** CaseHOLD is therefore an informative
+  forgetting guard; it is not at the floor.
+
+**Sweep** (dev, 499 items; constrained decoding at τ = 0.5; best epoch of ≤ 8 by dev macro-F1):
+
+| n | LR | refusal | best epoch | macro-F1 | AUROC | grounded | halluc. | over-ref. | ref. recall | format | score |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 500 | 0.0002 | 35% | 8 | 0.707 | 0.744 | 0.015 | 0.461 | 0.284 | 0.661 | 0.972 | -0.730 |
+| 1,000 | 0.0002 | 35% | 7 | 0.838 | 0.901 | 0.044 | 0.493 | 0.116 | 0.774 | 0.996 | -0.566 |
+| 2,000 | 5e-05 | 15% | 8 | 0.853 | 0.910 | 0.091 | 0.521 | 0.022 | 0.653 | 0.984 | -0.452 |
+| 2,000 | 5e-05 | 25% | 7 | 0.887 | 0.937 | 0.069 | 0.475 | 0.076 | 0.823 | 0.986 | -0.482 |
+| 2,000 | 5e-05 | 35% | 4 | 0.863 | 0.915 | 0.062 | 0.463 | 0.105 | 0.815 | 0.980 | -0.507 |
+| 2,000 | 0.0001 | 15% | 5 | 0.778 | 0.830 | 0.069 | 0.527 | 0.069 | 0.556 | 0.970 | -0.527 |
+| 2,000 | 0.0001 | 25% | 8 | 0.869 | 0.921 | 0.080 | 0.473 | 0.076 | 0.774 | 0.988 | -0.469 |
+| 2,000 | 0.0001 | 35% | 4 | 0.850 | 0.902 | 0.073 | 0.503 | 0.051 | 0.694 | 0.978 | -0.481 |
+| 2,000 | 0.0002 | 15% | 5 | 0.848 | 0.898 | 0.062 | 0.493 | 0.069 | 0.718 | 0.990 | -0.500 |
+| 2,000 | 0.0002 | 25% | 7 | 0.854 | 0.919 | 0.047 | 0.471 | 0.098 | 0.766 | 0.988 | -0.522 |
+| 2,000 | 0.0002 | 35% | 5 | 0.864 | 0.927 | 0.102 | 0.445 | 0.080 | 0.782 | 0.986 | -0.423 |
+
+**Selected:** LR 2e-4, refusal 35% (score −0.423).
+- **Learning curve** at that setting: 500 → 1,000 → 2,000 examples gives grounded 0.015 → 0.044 →
+  0.102 and score −0.730 → −0.566 → −0.423. **Still climbing clearly**, so 10K is justified (§3.1).
+
+**τ table** (best weights, teacher-forced decisions on dev):
+- AUROC **0.934**.
+- Macro-F1 0.851 at τ 0.5, best 0.872 at τ 0.7.
+- Refusal precision/recall: 0.721/0.855 at τ 0.5 and 0.782/0.839 at τ 0.7.
+
+**Forgetting guards: FAILED** (pre-registered limits: bits/byte +0.02; CaseHOLD −2 points).
+
+| Guard | Base | After | Change |
+|---|---|---|---|
+| Pooled bits/byte | 0.7090 | 0.7404 | **+0.0314** |
+| Case law bits/byte | 0.6954 | 0.7261 | +0.031 |
+| SEC bits/byte | 0.4532 | 0.4813 | +0.028 |
+| Web bits/byte | 1.0191 | 1.0549 | +0.036 |
+| CaseHOLD PMI | 0.598 | 0.555 (CI 0.538–0.571) | **−4.4 points**, CIs disjoint |
+
+acc and acc_norm are unchanged (−0.3/−0.4); they only track length.
+
+**Diagnosis of low grounded accuracy** (best pilot weights, 40 random dev A items, local CPU):
+
+| Outcome | Count |
+|---|---|
+| Quote not from the passage | 17 |
+| Near-verbatim quote | 8 |
+| Refused | 7 |
+| Wrong passage | 4 |
+| Correct | 3 |
+| Answer mismatch | 1 |
+
+- The model usually picks the right passage and the right answer/refuse decision. It **does not
+  copy**: it writes a fluent paraphrase in the `Quote:` field (e.g. "We hold that Tinsley was
+  immune…" where the passage says "…argue that they are immune… We agree."). The answers are often
+  semantically right, but the quotes are invented.
+
+
+**Fix for the invented quotes: copy-constrained decoding** (free, inference-time; `eval_raft.CopyConstraint`).
+- Inside `Quote: "`, a token is allowed only if the quote stays a substring of the cited passage.
+- The quote may close only with `"` or `"\n` (a `")` token would break the format). A 300-character
+  cap forces it to close.
+- Unit-tested (clean close, cap) before use.
+
+Same 80 dev items (40 A, 40 B1/B2/B3), best pilot weights, local CPU:
+
+| Decoding | grounded | hallucination | format | score | A outcomes |
+|---|---|---|---|---|---|
+| Plain | 0.075 | 0.450 | 1.000 | −0.550 | 3 correct; 17 quote not from passage; 8 near-verbatim; 7 refused; 4 wrong passage; 1 answer mismatch |
+| **Copy-constrained** | **0.200** | **0.163** | 1.000 | **−0.137** | 8 correct; **17 answer mismatch**; 4 quote not verbatim; 7 refused; 4 wrong passage |
+
+- The answer/refuse decisions are identical in both modes (80/80): the constraint changes only the
+  quote. B items are unchanged (33 refused, 7 answered).
+- **What remains is wrong-span selection.** The quote is now verbatim, but it is often the wrong
+  sentence. Example: asked what the appeals court did after finding error, it quotes "the court
+  found that the Commission erred" instead of the remand. More and better data (7.8) is the lever
+  for this; decoding can't fix it.
+- **Decision (D-21):** report every proxy and the final test under **both** decodings. Copy-constrained
+  decoding is the recommended serving mode.
+
+### 7.6b Forgetting follow-up: PLANNED, awaiting GPU approval (written 2026-10-17, before any run)
+**Why.** Both guards failed at the pilot's best epoch (≈ 195 steps). The pre-registered remedy is
+λ = 0.5. But the full 7.8 run is **579 steps** (10K × 3 epochs; pilot 2K × 8 epochs = 312), so the
+end-point numbers from 7.6 can't tell us whether any λ holds the guard at 7.8's length. We need
+the **slope**.
+
+**What.** One 1 × H100 container (`raft_gpu_app.py::lambda_check`):
+- 4 arms from `config.SFT.forgetting_arms`, each at the 7.6 selection (n 2,000, refusal 35%,
+  ≤ 8 epochs):
+  - LR 2e-4 at λ 0.25 / **0.5** / 1.0;
+  - LR 5e-5 (the 7.6 runner-up, best macro-F1) at λ 0.5, to test whether a lower LR forgets less.
+- Per arm:
+  - held-out pooled bits/byte after **every** epoch (`train_one(extra_eval=…)`, same 600-window
+    subset and batch as the official baseline);
+  - CaseHOLD PMI at the best epoch;
+  - dev proxies with plain and copy-constrained decoding.
+- The λ 0.25 arm repeats the 7.6 run, so it doubles as a reproducibility check against +0.0314.
+
+**Pre-registered rule.**
+- **Projection.** For each arm, fit bits/byte delta against step on the last 4 per-epoch points,
+  and extrapolate to step 579.
+- **Eligibility.** An arm passes if its projected delta is ≤ +0.02 **and** its CaseHOLD PMI drop at
+  the best epoch is ≤ 2 points.
+- **Choice.** Among passing arms, take the highest copy-decoding selection score.
+- **If no arm passes,** stop and bring the options to the user: λ > 1, a lower replay ratio
+  (`sft_per_replay` 4 → 2), fewer 7.8 epochs, or accept a documented guard miss. Don't pick one
+  silently.
+
+**Cost.**
+- About 170 s per arm (7.6 runs took 73 s; adding 8 held-out evals, CaseHOLD and a second
+  generation pass) + staging and compile. ≈ 12 min, **≈ $1.00** at the measured $0.00127/s.
+- `--max-usd 1.6`. The entrypoint refuses anything above what is left of the 7.6 cap
+  ($4 − $1.37 = $2.63). The container stops before any arm that would cross `--max-usd`.
+
+**Resume.** Results are appended per arm to `/data/raft/runs/pilot_lambda/results.jsonl`, and a
+restarted container skips finished arms. `--detach`; afterwards, verify 0 containers.
+
+**Validation.**
+- The λ 0.25 arm's bits/byte delta at its best epoch is within ±0.005 of 7.6's +0.0314.
+- Every arm logs one history point per epoch (smoke-tested: 2 calls for 2 epochs). The full local
+  suite `smoke_raft.py --sft` passes **62/62** (2026-10-17), including the bit-identical
+  crash-and-resume test.

@@ -243,9 +243,10 @@ def fingerprint(cfg: RunConfig, plan: Plan, n_train: int) -> dict:
 
 def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train: SFTData, dev: SFTData | None,
               store: WindowStore | None, dec: dict, device: torch.device, out: Path | None,
-              log=print) -> dict:
+              log=print, extra_eval=None) -> dict:
     """Train one run. With `out`, writes metrics/ckpt/ledger and resumes from out/ckpt.pt. Returns
-    {'best': {...}, 'best_state': CPU state dict or None, 'status', 'steps'}."""
+    {'best': {...}, 'best_state': CPU state dict or None, 'status', 'steps', 'plan', 'history': every dev
+    eval}. `extra_eval()` (optional) returns more metrics to merge into each dev eval."""
     plan = make_plan(len(train), cfg.epochs, cfg.seq_len, cfg.batch_sequences, cfg.micro, cfg.sft_per_replay)
     order = StreamOrder(len(train), cfg.seed)
     end = min(plan.total_steps, cfg.max_steps) if cfg.max_steps else plan.total_steps
@@ -253,7 +254,7 @@ def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train:
     fp = fingerprint(cfg, plan, len(train))
     opt = build_optimizer(raw, device)
     start, best = 0, {"dev_macro_f1": -1.0, "step": 0}
-    best_state = None
+    best_state, history = None, []
     paths = {k: out / v for k, v in (("ckpt", "ckpt.pt"), ("metrics", "metrics.jsonl"),
                                      ("ledger", "spend.json"), ("best", "best.pt"))} if out else {}
     if out:
@@ -321,7 +322,11 @@ def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train:
                 append_metrics(paths["metrics"], row)
         if dev is not None and (done % eval_every == 0 or done == end):
             ev = evaluate(raw, dev, dec, device)
+            if extra_eval is not None:                 # e.g. held-out bits/byte for forgetting curves
+                ev.update(extra_eval())
+                raw.train()
             ev["step"] = done
+            history.append(ev)
             log(f"[eval] step {done} " + " ".join(f"{k} {v:.4f}" for k, v in ev.items()
                                                   if isinstance(v, float)))
             if out:
@@ -339,7 +344,8 @@ def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train:
             break
     if ledger:
         ledger.write(paths["ledger"])
-    return {"status": status, "steps": end, "best": best, "best_state": best_state, "plan": asdict(plan)}
+    return {"status": status, "steps": end, "best": best, "best_state": best_state, "plan": asdict(plan),
+            "history": history}
 
 
 def export(raw: torch.nn.Module, state: dict | None, out_dir: Path, tokenizer_dir: str, tau: float = 0.5) -> None:

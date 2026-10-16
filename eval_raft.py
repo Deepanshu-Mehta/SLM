@@ -80,10 +80,53 @@ class RaftConstraint(LogitsProcessor):
         return scores
 
 
+_QUOTE_OPEN = re.compile(r'^ Passage (\d)\nQuote: "(.*)$', re.S)
+
+
+class CopyConstraint(LogitsProcessor):
+    """Copy-constrained quoting: while generation is inside `Quote: "...`, only tokens that keep
+    the quote an exact substring of the cited passage (or that close the quote) are allowed.
+    The answer/refuse decision is untouched; tokens are ranked by the model, best first."""
+
+    def __init__(self, tok, prompt_width: int, passages: list[list[str]], vocab: list[str], top: int = 256,
+                 max_quote_chars: int = 300):
+        self.tok, self.width, self.passages, self.vocab, self.top = tok, prompt_width, passages, vocab, top
+        self.max_quote_chars = max_quote_chars        # ~40 words, the target spec; then force the close
+        self.fallbacks = 0
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if input_ids.shape[1] - self.width < 3:
+            return scores
+        for b in range(scores.shape[0]):
+            text = self.tok.decode(input_ids[b, self.width:].tolist(), skip_special_tokens=True)
+            m = _QUOTE_OPEN.match(text)
+            if not m or '"' in m.group(2):
+                continue
+            k, q = int(m.group(1)), m.group(2)
+            ps = self.passages[b]
+            if not 1 <= k <= len(ps):
+                continue
+            src = ps[k - 1]
+            allowed = []
+            must_close = len(q) >= self.max_quote_chars
+            for i in torch.topk(scores[b], self.top).indices.tolist():
+                t = self.vocab[i]
+                closes = (t == '"' or t.startswith('"\n')) and q and q in src   # keep `"\nAnswer:` intact
+                if closes or (not must_close and t and not t.startswith('"') and (q + t) in src):
+                    allowed.append(i)
+            if not allowed:                       # nothing in the top candidates continues the copy
+                self.fallbacks += 1
+                continue
+            keep = scores[b, allowed].clone()
+            scores[b] = -math.inf
+            scores[b, allowed] = keep
+        return scores
+
+
 @torch.no_grad()
 def generate_batch(net, tok, prompts: list[str], ks: list[int], device: torch.device,
                    tau: float | None = 0.5, max_new: int = config.SFT.max_new_tokens,
-                   batch: int = 32, autocast=None) -> list[dict]:
+                   batch: int = 32, autocast=None, copy_passages: list[list[str]] | None = None) -> list[dict]:
     """Greedy constrained generation. Returns [{'s', 'choice', 'text'}] where text starts after
     `Source:` (prepend 'Source:' to parse)."""
     ids = decision_ids(tok)
@@ -98,13 +141,18 @@ def generate_batch(net, tok, prompts: list[str], ks: list[int], device: torch.de
             x[j, width - len(e):] = torch.tensor(e)
             mask[j, width - len(e):] = 1
         proc = RaftConstraint(ids, width, ks[i:i + batch], tau)
+        procs = [proc]
+        if copy_passages is not None:
+            if not hasattr(generate_batch, "_vocab"):
+                generate_batch._vocab = [tok.decode([j]) for j in range(len(tok))]
+            procs.append(CopyConstraint(tok, width, copy_passages[i:i + batch], generate_batch._vocab))
         ctx = autocast() if autocast else torch.autocast("cpu", enabled=False)
         with ctx:
             # An explicit config: the base model's saved one has min_new_tokens=16 and sampling,
             # which blocks <|eos|> after the 15-token refusal (found by the 7.5 smoke test).
             y = net.generate(input_ids=x.to(device), attention_mask=mask.to(device),
                              generation_config=GREEDY.__class__(**{**GREEDY.to_dict(), "max_new_tokens": max_new}),
-                             logits_processor=LogitsProcessorList([proc]))
+                             logits_processor=LogitsProcessorList(procs))
         for j in range(len(enc)):
             gen = y[j, width:].tolist()
             if M.EOS_TOKEN_ID in gen:

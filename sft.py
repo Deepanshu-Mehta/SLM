@@ -130,7 +130,8 @@ def init_chat_tokens(raw: torch.nn.Module, seed: int = S.seed) -> dict:
     E_ = raw.get_input_embeddings().weight
     keep = torch.ones(E_.shape[0], dtype=torch.bool)
     keep[list(UNTRAINED_ROWS)] = False
-    T = E_[keep].double()
+    T = E_.detach().cpu()[keep].double()             # statistics and sampling on CPU in float64
+                                                     # (the generator is CPU; MPS has no float64)
     mu = T.mean(0)
     cov = torch.cov(T.T) + 1e-6 * torch.eye(T.shape[1], dtype=torch.float64)
     g = torch.Generator().manual_seed(seed)

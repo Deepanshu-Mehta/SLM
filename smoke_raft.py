@@ -589,6 +589,15 @@ def sweep_checks(tok) -> None:
                                 [{"n": 24, "lr": 2e-4, "refusal_share": 0.15}], Path(tmp) / "r2.jsonl", cfg,
                                 budget_ok=lambda: False, log=lambda *_: None)
         check("sweep: the budget guard stops before a run", stopped == [])
+        A = {"bucket": "A", "k": 1, "passages": ["Acme Corp reported revenue of $5 million in 1990."], "answer": "$5 million"}
+        U = {"bucket": "B1", "k": None, "passages": ["Acme Corp reported revenue of $5 million in 1990."]}
+        good = {"choice": "pass", "text": ' Passage 1\nQuote: "revenue of $5 million in 1990"\nAnswer: $5 million'}
+        junk = {"choice": "pass", "text": " Passage 1 garbled"}
+        refuse = {"choice": "none", "text": " none\nAnswer: " + config.RAFT.refusal}
+        m = E.proxy_metrics([A, U, U, A], [good, junk, refuse, refuse])
+        check("proxy metrics: a malformed answer on an unanswerable item counts as hallucination",
+              m["proxy_hallucination"] == 0.25 and m["refusal_recall"] == 0.5 and m["over_refusal_A"] == 0.5
+              and m["proxy_grounded_acc"] == 0.5 and m["format_validity"] == 0.75, str(m))
         b = sft.best_run(rows)
         check("sweep: best_run picks the highest selection score",
               b["selection_score"] == max(r["selection_score"] for r in rows))

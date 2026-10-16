@@ -204,25 +204,30 @@ def decision_metrics(scores: list[float], refuse_gold: list[bool], buckets: list
 
 
 def proxy_metrics(rows: list[dict], outputs: list[dict]) -> dict:
-    """Deterministic §7.2 proxies from constrained generations on dev rows."""
-    a_ok = a_n = a_refused = unans_answered = unans_n = answered = bad_quote = valid = 0
+    """Deterministic §7.2 proxies from constrained generations on dev rows.
+
+    Answer/refuse comes from the constrained decision (`choice`), not from parsing: a malformed
+    output after `ĠPass` still asserted an answer, so it counts as a hallucination on an
+    unanswerable item and can never count as grounded (fixed 2026-10-16; parsing alone let
+    malformed outputs count as neither)."""
+    a_ok = a_n = a_refused = unans_answered = unans_n = bad_quote = valid = 0
     for r, o in zip(rows, outputs):
         p = parse_output(o["text"])
         valid += p["valid"]
+        choice = o.get("choice")
+        refused = choice == "none" if choice else p["refusal"] is True
+        answered = choice == "pass" if choice else p["refusal"] is False
         if r["bucket"] in ("B1", "B2", "B3"):
             unans_n += 1
-            unans_answered += p["refusal"] is False
-        if p["refusal"] is False:
-            answered += 1
-            k = p["k"] or 0
-            quote_ok = (p["quote"] is not None and 1 <= k <= len(r["passages"])
-                        and p["quote"] in r["passages"][k - 1])
-            bad_quote += (r["bucket"] == "A" and not quote_ok)
+            unans_answered += answered
         if r["bucket"] == "A":
             a_n += 1
-            a_refused += p["refusal"] is True
-            if (p["refusal"] is False and p["k"] == r["k"] and p["quote"]
-                    and p["quote"] in r["passages"][r["k"] - 1]
+            a_refused += refused
+            quote_ok = (p["valid"] and not p["refusal"] and p["quote"] is not None and p["k"]
+                        and 1 <= p["k"] <= len(r["passages"]) and p["quote"] in r["passages"][p["k"] - 1])
+            if answered and not quote_ok:
+                bad_quote += 1
+            if (answered and quote_ok and p["k"] == r["k"]
                     and token_f1(p["answer"] or "", r["answer"] or "") >= 0.5):
                 a_ok += 1
     n = max(1, len(rows))

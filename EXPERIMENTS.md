@@ -207,6 +207,33 @@ is flagged:
 
 These are models, not measurements; the step 7.3 trial measures them. → `docs/08-raft.md` §9
 
+### E-19 · Phase 7 plan review: measurements (2026-10-16)
+Measured on the released weights and tokenizer (`.smoke/final/base`):
+
+- **Never-seen token rows have collapsed.**
+  - Embedding rows 0 and 2–6 (bos, pad, unk, user, assistant, system) point almost the same way:
+    pairwise cosine ≈ 0.95, cosine 0.88 with the mean embedding, norm ≈ 1.1 (like trained rows).
+  - As outputs they sit at log-prob ≈ −25, against a median of −18 for trained tokens.
+  - So `<|user|>` and `<|assistant|>` are nearly the same input vector. "Mean + small noise" would
+    keep them so; the init now samples from N(μ, Σ) of the trained rows.
+- **The decision token pair.**
+  - `Source:` = `S` `ource` `:`; ` none` = `Ġnone` (id 5494), one token.
+  - ` Passage` = `ĠPass` (id 12175) + `age`.
+  - The answer/refuse decision is therefore `Ġnone` vs `ĠPass`, at one position.
+- **The refusal target** is 19 tokens including `<|eos|>`.
+- **Encoding is boundary-safe.** Encoding segment by segment at special-token boundaries gives the
+  same ids as encoding the whole string. The tokenizer has no normaliser, and curly quotes and `§`
+  round-trip exactly.
+- **Loss weighting.**
+  - Measured target lengths: answerable 62, refusal 19, summary 45 tokens.
+  - With 1 replay window per 4 SFT sequences, a pooled per-token mean gives replay **84%** of the
+    loss weight (13.1K vs 2.5K target tokens per 64-sequence batch).
+  - A per-example mean would raise the effective refusal prior from 25% to **~50%**.
+- **Validation shard order:** shards sort as case-law, fineweb-edu, sec. A capped `train.evaluate()`
+  therefore reads case law only.
+
+→ `docs/08-raft.md` (review edits applied)
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -227,6 +254,7 @@ These are models, not measurements; the step 7.3 trial measures them. → `docs/
 | D-14 | 10-05 | Rewrite history to drop `initial.txt`; keep the email; **the user pushes manually** | The user's choice before the first push |
 | D-15 | 10-05 | Phase 7 plan (recommendation, not yet executed): **direct RAFT with teacher-written, quote-grounded targets**; refuse when the correct passage is missing; $0 baseline first; ~2K-example pilot | 125M params can't absorb a teacher's knowledge; logit distillation is impossible (different vocabulary); 1,024-token context; chat format never seen |
 | D-16 | 10-16 | Phase 7 setup (user's choice): **`deepseek-flash` writes and checks, off-peak; `gemini-3.8-flash` is the independent checker; 10K training examples; pre-filter source passages; thinking only on refusal-label checks**; ≈ $20 | E-18: about 4× cheaper than Gemini + Sonnet at 20K. DeepSeek's terms allow training on outputs. Quality is protected by two-family agreement on dev/test labels, the 5% audit, and incremental top-up if targets are missed |
+| D-17 | 10-16 | Phase 7 review fixes (user-approved patch): SFT and replay losses normalised separately (λ = 0.25, per-token within SFT); rows 4–6 sampled from N(μ, Σ); dev/test leakage scanned against the whole pretraining corpus; paired A/B1 with same-document distractors; C-bucket placeholder and V2 check; DeepSeek thinking explicitly off, with `max_tokens` caps; per-bucket audit fallback (≤ $3); pilot compiled once | E-19. Net cost ≈ $0; estimate stays ≈ $20 |
 
 ## Corrections log
 

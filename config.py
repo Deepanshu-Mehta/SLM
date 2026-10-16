@@ -269,8 +269,11 @@ TEACHER = TeacherConfig()
 
 # Approved spend caps per paid stage (USD), docs/08-raft.md §9. Each needs explicit approval.
 RAFT_STAGE_CAPS_USD: Mapping[str, float] = {
-    "7.3-trial": 3.0, "7.4-pilot-data": 4.0,    # 7.4 re-quoted from the trial: ~$1.90 (E-22) "7.6-pilot-gpu": 4.0,
-    "7.8-scale-data": 12.0, "7.8-full-gpu": 2.0,
+    "7.3-trial": 3.0,
+    "7.4-pilot-data": 4.0,          # lowered from $10 after the trial re-quote (~$1.90, E-22)
+    "7.6-pilot-gpu": 4.0,
+    "7.8-scale-data": 12.0,
+    "7.8-full-gpu": 2.0,
 }
 
 

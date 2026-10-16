@@ -297,6 +297,9 @@ def teacher_output_checks(tok) -> None:
 def main() -> None:
     tok = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
     assert config.RAFT.k_passages == 4
+    caps = config.RAFT_STAGE_CAPS_USD
+    check("config: every paid stage has a cap", set(caps) == {"7.3-trial", "7.4-pilot-data", "7.6-pilot-gpu",
+                                                             "7.8-scale-data", "7.8-full-gpu"}, str(dict(caps)))
     data_checks(tok)
     pipeline_checks(tok)
     teacher_output_checks(tok)

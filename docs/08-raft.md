@@ -1229,3 +1229,37 @@ restarted container skips finished arms. `--detach`; afterwards, verify 0 contai
 - Every arm logs one history point per epoch (smoke-tested: 2 calls for 2 epochs). The full local
   suite `smoke_raft.py --sft` passes **62/62** (2026-10-17), including the bit-identical
   crash-and-resume test.
+
+### 7.6b Forgetting follow-up: DONE (2026-10-17, $1.18; 7.6 total $2.55 of the $4 cap)
+One container, 877 s; 0 containers afterwards. Staging took 205 s (a cold Volume read; 7.6 took 3 s).
+
+Held-out pooled bits/byte change after each epoch (39 steps per epoch, 312 steps total):
+
+| Arm | ep1 | ep2 | ep3 | ep4 | ep5 | ep6 | ep7 | ep8 (end) | best step | CaseHOLD PMI at best | macro-F1 | copy score | plain score |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| LR 2e-4, λ 0.25 | +.052 | **+.056** | +.055 | +.048 | +.041 | +.036 | +.032 | +.029 | 156 | −4.9 | 0.868 | **+0.086** | −0.490 |
+| LR 2e-4, λ 0.5 | +.042 | +.046 | +.046 | +.041 | +.036 | +.032 | +.029 | +.027 | 312 | −3.7 | 0.843 | −0.001 | −0.505 |
+| LR 2e-4, λ 1.0 | +.036 | +.042 | +.043 | +.039 | +.035 | +.031 | +.028 | +.026 | 273 | **−1.1** | 0.840 | −0.029 | −0.510 |
+| LR 5e-5, λ 0.5 | +.010 | +.009 | +.009 | +.009 | +.007 | +.006 | +.006 | **+.006** | 234 | −4.8 | 0.861 | −0.028 | −0.521 |
+
+Copy-constrained grounded accuracy is 0.21–0.25 in every arm, versus 0.05–0.07 plain. Hallucination is
+0.08–0.13 copy, versus 0.41–0.52 plain.
+
+**Findings.**
+1. **Forgetting is a transient, not a slope.** It peaks at epochs 2–3, while the LR is high, then recovers
+   as the cosine schedule anneals. The rule's premise (forgetting grows with steps, so extrapolate to
+   step 579) is **false** (C-12). Its linear fit on epochs 5–8 extrapolates the *recovery* and projects
+   +0.002 to +0.006 for every arm. That is an artefact: 7.8's schedule stretches the same peak-then-anneal
+   shape over 579 steps. Read mechanically, the rule picks LR 2e-4 / λ 1.0. **I am not adopting that
+   pick**, because its measured end-of-run change is +0.026, above the +0.02 limit.
+2. **LR is the bits/byte lever; λ is weak.** At the end of the schedule, λ 0.25 → 1.0 moves bits/byte only
+   from +0.029 to +0.026. LR 2e-4 → 5e-5 moves it to +0.006 and flattens the peak.
+3. **CaseHOLD PMI doesn't track bits/byte.** LR 5e-5 barely moves bits/byte but loses 4.8 points. λ 1.0 is
+   the only arm within 2 points (−1.1). CaseHOLD was measured at a different epoch in each arm (the
+   best-by-macro-F1 epoch), so the comparison is confounded by epoch.
+4. **Reproducibility check: failed as specified, consistent on inspection.** The λ 0.25 arm's best epoch is
+   4 here (+0.048); 7.6's sweep picked epoch 5, and here epoch 5 is +0.041, not +0.031. But **epoch 7 here
+   is +0.0315 vs 7.6's +0.0314**, which suggests 7.6's guard retrain landed on epoch 7. Unverified:
+   7.6 didn't record the retrain's best epoch. Choosing the best epoch by dev macro-F1 is itself noisy
+   (arms differ by ≤ 0.03), so it moves between otherwise identical runs.
+5. **No arm passes both guards on measured end-of-run numbers.** By the rule's own fallback: stop and ask.

@@ -374,6 +374,28 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Follow-up planned (7.6b, needs approval).** Per-epoch held-out bits/byte for 4 (LR, λ) arms, to
   project forgetting to 7.8's 579 steps. Pre-registered rule in `docs/08-raft.md` §13.
 
+### E-28 · Step 7.6b forgetting follow-up on 1 × H100 (2026-10-17, $1.18)
+- 4 arms at the 7.6 selection (n 2,000, refusal 35%, 8 epochs = 312 steps), with held-out bits/byte every
+  epoch. Full table in `docs/08-raft.md` §13.
+- **Forgetting is transient.** In every arm, bits/byte peaks at epochs 2–3 and recovers as the cosine LR
+  anneals:
+  - LR 2e-4 λ 0.25: peak +0.056, end +0.029;
+  - λ 0.5: +0.046 / +0.027;
+  - λ 1.0: +0.043 / +0.026;
+  - LR 5e-5 λ 0.5: +0.010 / +0.006.
+- **LR is the lever for bits/byte; λ barely matters.** CaseHOLD PMI at the best epoch: −4.9 / −3.7 /
+  **−1.1** / −4.8 points. Only λ 1.0 is within the −2 limit; it isn't explained by bits/byte.
+- **Copy-constrained decoding on the full 499-item dev set:**
+  - score −0.49…−0.52 → −0.03…+0.09;
+  - grounded 0.05–0.07 → 0.21–0.25;
+  - hallucination 0.41–0.52 → 0.08–0.13.
+  - Confirms the E-27 80-item result.
+- **The pre-registered projection was invalid (C-12).** Its mechanical pick (LR 2e-4 / λ 1.0) measures
+  +0.026 at the end of the run, so it isn't adopted. No arm passes both guards on measured numbers, so the
+  decision goes back to the user.
+- **Reproducibility:** the λ 0.25 arm's epoch 7 (+0.0315) matches 7.6's guard value (+0.0314). The
+  best-epoch pick moved (4 vs 5) because dev macro-F1 differs by < 0.03 between epochs.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -415,3 +437,4 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | C-09 | Stream events counted as tokens | The true count comes in the `done` event | E-14 |
 | C-10 | SEC held-out 0.463 bits/byte read as generalisation | Optimistic: 61% of SEC val passages share ≥ 50% of their 13-grams with training filings | E-20 |
 | C-11 | Trial 7.3 first scoring: Gemini ≥ 10 points better as writer; checker agreement 82.4% | DeepSeek 64.0% vs Gemini 71.4% (keep DeepSeek); agreement 90.0% | `answers_agree` used token-F1. 55 of 60 "disagreements" had the same passage and quote with a verbose answer (E-22) |
+| C-12 | 7.6b rule: forgetting grows with steps, so extrapolate the per-epoch bits/byte linearly to 7.8's 579 steps | Forgetting peaks at epochs 2–3 and recovers as the cosine LR anneals; the linear fit extrapolated the recovery | The rule was written before seeing any per-epoch data. Its pick isn't adopted; measured end-of-run numbers are used (E-28) |

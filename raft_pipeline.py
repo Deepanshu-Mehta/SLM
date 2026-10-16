@@ -463,7 +463,8 @@ def cmd_select(args) -> None:
         keep[(r["group"], r["bucket"])]["assembled"] += 1
     for r in acc:
         keep[(r["group"], r["bucket"])]["accepted"] += 1
-    datasets, shortfall = {}, {}
+    datasets, shortfall, swapped = {}, {}, []
+    excl = json.loads((st / "exclusions.json").read_text()) if (st / "exclusions.json").exists() else {}
     for grp, quota in PILOT_QUOTAS.items():
         by = defaultdict(list)
         for r in acc:
@@ -493,6 +494,19 @@ def cmd_select(args) -> None:
                     others[r["source"]].append(r)
             b3 = make_b3(spare, quota["B3"], others, tok, rng)
             chosen = a_sel + b1_sel + by["B2"][:quota["B2"]] + by["C"][:quota["C"]] + b3
+        # Reviewed exclusions (exclusions.json: id -> reason): swap each for the next unused
+        # accepted row of the same bucket, so every other selection stays identical.
+        in_use = {r["cid"] for r in chosen}
+        for i, r in enumerate(chosen):
+            if r["cid"] in excl:
+                if r["bucket"] == "B1" and grp in ("dev", "test"):
+                    raise SystemExit(f"{r['cid']}: excluding a paired B1 needs its A twin handled too")
+                spare = next((x for x in by[r["bucket"]] if x["cid"] not in in_use and x["cid"] not in excl), None)
+                if spare is None:
+                    raise SystemExit(f"no spare {r['bucket']} in {grp} to replace {r['cid']}")
+                chosen[i] = spare
+                in_use.add(spare["cid"])
+                swapped.append({"group": grp, "out": r["cid"], "in": spare["cid"], "reason": excl[r["cid"]]})
         got = Counter(r["bucket"] for r in chosen)
         shortfall[grp] = {b: q - got[b] for b, q in quota.items() if got[b] < q}
         rng.shuffle(chosen)
@@ -529,7 +543,8 @@ def cmd_select(args) -> None:
         if not r["passages"]:
             md += ["> *(no passages)*", ">"]
         md += ["", f"**Target:** `Source:{target.replace('<|eos|>', '')}`", ""]
-    (st / "spot_check.md").write_text("\n".join(md))
+    if not (st / "spot_check.md").exists():       # keep the file the user already reviewed
+        (st / "spot_check.md").write_text("\n".join(md))
     # report
     rep = {"keep": {f"{g}:{b}": dict(v) for (g, b), v in sorted(keep.items())},
            "composition": {g: dict(Counter(r["bucket"] for r in d)) for g, d in datasets.items()},
@@ -542,6 +557,7 @@ def cmd_select(args) -> None:
            "a_types": {g: dict(Counter(r.get("type") for r in d if r["bucket"] == "A")) for g, d in datasets.items()},
            "tokens_max": {g: max((r["n_tokens"] for r in d), default=0) for g, d in datasets.items()},
            "test_pairs": sum(1 for r in datasets["test"] if r["bucket"] == "B1"),
+           "exclusions_applied": swapped,
            "funnel": json.loads((st / "funnel.json").read_text())}
     lg = json.loads((st / "ledger.json").read_text())
     mc = json.loads((st / "modal_cost.json").read_text()) if (st / "modal_cost.json").exists() else {}

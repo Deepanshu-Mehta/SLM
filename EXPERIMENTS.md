@@ -305,6 +305,19 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Type mix (train A):** number 29% / fact 27% / party 18% / yes-no 14% / rule-holding 6% /
   definition 6%. The rule-holding type request is largely ignored.
 
+### E-24 · Pilot spot-check and near-miss label noise (2026-10-16)
+- **The user's spot-check found 1 real error in 50** (item 31, B2: the passage gives the asked
+  figure).
+- **Item 29 was not an error.** The review quoted text that exists nowhere in the item or its removed
+  oracle; the refusal is correct.
+- **Assistant read-through of 15 dev/test B2 items:** 13 correct, 1 borderline (dropped). The
+  estimated B2 label noise is ≈ 5–10%.
+- **Both bad test items were swapped** for verified spares through `exclusions.json`; only those
+  2 rows changed.
+- **Lesson:** two-checker agreement still passes near misses whose qualifier ("including HSI") makes
+  a stated figure look absent. The near-miss bucket needs extra scrutiny wherever it defines
+  reported numbers.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

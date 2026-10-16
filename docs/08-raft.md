@@ -936,3 +936,33 @@ filled exactly; no shortfall.**
   DeepSeek often ignores the request.
 - **Pending: the user's spot-check** of 50 dev/test items in `.smoke/raft/pilot/spot_check.md`.
 
+### 7.4 Spot-check outcome (2026-10-16)
+**The user's review of `spot_check.md` raised two items. Verified against the stored passages:**
+- **Item 31** (B2, SEC, "US segment revenue in 1999, including HSI"): **a real label error.**
+  - Passage 3 states US revenue of $256.4M for 1999, and "Excluding HSI, revenue increased by
+    37.0%" implies the reported totals include HSI.
+  - The review's own argument relied on outside facts ("the underlying 10-K… HSI attributed to the
+    Europe segment"), which our labels may not use. The in-passage reading reaches the same verdict.
+  - **Dropped, not converted to an A item:** "including HSI" needs an inference, so the item fails
+    A's explicit-statement rule as well.
+- **Item 29** (B1, Delaware §228(d)): **the refusal label is correct.** The review quoted Passage 2 as
+  saying "prompt notice thereof was provided to all stockholders". In fact Passage 2 is an executive
+  biography, and that sentence appears in none of the passages, nor in the removed oracle (which says
+  "The remaining stockholders of the Company were notified…").
+
+**Near-miss (B2) read-through by the assistant**, 15 random dev/test items:
+- 13 are correct, including several excellent ones (e.g. a passage that says the representatives
+  are *not identified*).
+- 1 is borderline ("the director's handbook requirement for operable windshield washers": the
+  passage says the requirement was "an operable windshield washer"), so it was **dropped**.
+- With item 31, the estimated B2 label noise is ≈ 5–10%. B2 is the bucket closest to the decision
+  boundary by design.
+
+**Fix.**
+- `exclusions.json` records each dropped id with its reason. `select` swaps each excluded row for the
+  next unused accepted row of the same bucket.
+- Verified: exactly 2 test rows changed; train, dev and probe are identical.
+- The two replacements were read and are valid near misses (Personnel Officer *qualifications*; a
+  Y2K *budget*).
+- Re-uploaded to `raft/datasets/pilot/`. The reviewed `spot_check.md` is kept unchanged.
+

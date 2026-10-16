@@ -501,7 +501,7 @@ Model answer: {model_answer}
 | Epochs | full run: **3**, keeping the checkpoint with the best dev decision-F1. Pilot: up to 8, evaluated every epoch, best dev kept | the pilot's best epoch count sets the full run's; small curve points aren't starved of steps |
 | Sequence | exactly 1,024 tokens, right-padded | one compiled shape |
 | Loss | **L = L_sft + λ·L_replay, λ = 0.25.** Each term is a per-token mean of fp32 cross-entropy over *its own* target tokens in the **whole global batch** (summed over micro-batches, then divided by the global count; not HF's per-micro-batch mean ÷ accumulation steps) | a single pooled mean would give replay **84%** of the loss weight (13.1K replay vs 2.5K SFT target tokens per batch; measured target lengths: A 62, refusal 19, summary 45), diluting SFT ~6× and confounding the LR sweep. Within SFT, keep the per-token mean: every example then has exactly one decision token of equal weight, so the refusal share *is* the decision prior. A per-example mean would silently turn 25% into ~50% |
-| Replay | 1 raw train window per 4 SFT sequences, weighted λ = 0.25 (≈ 20% of the loss) | forgetting guard. If the bits/byte guard fails, raise λ to 0.5 |
+| Replay | 6 raw train windows per 26 SFT rows in every 32-row micro-batch (≈ 1 per 4.3; fixed shape), weighted λ = 0.25. Each term is normalised by its own token count, so replay is ≈ 20% of the loss whatever the row ratio | forgetting guard. If the bits/byte guard fails, raise λ to 0.5 |
 | Grad clip / dropout | 1.0 / 0 | as pretraining |
 | Eval decoding | greedy, ≤ 128 new tokens, stop at `<\|eos\|>`, suppress ids 0, 2–6 | deterministic metrics |
 | Seed | 1337 | |
@@ -684,8 +684,9 @@ learning-curve check in §3.1 (more data or not).
 ### 7.1 Baselines, local sanity run (2026-10-16, $0)
 `eval_forgetting.py`, run on MPS in fp32, from the released bf16 weights (`.smoke/final/base`).
 
-**Held-out subset:** 200 seeded windows from each source's `-000` val shard; the shard sha256s are
-recorded in `.smoke/reports/raft_baseline_local.json`.
+**Held-out subset:** 200 seeded windows from each source's `-000` val shard. The shard sha256s are
+recorded in `.smoke/reports/raft_baseline_local.json` (written 2026-10-16 from the run's log, after the
+full run was stopped for swapping). The Volume's shards were verified identical before 7.6.
 
 | Source | Loss | Bytes/token | Bits/byte | E-13 (96 windows) |
 |---|---|---|---|---|
@@ -1078,4 +1079,18 @@ would fail at random. The check is now "does not dominate: below the trained p95
 
 **Local limits.** The 8.6 GB Mac swaps heavily during CPU training (≈ 25 min for the suite). That's
 fine for the smoke test; all real training is on the GPU.
+
+### 7.6 pre-launch review (2026-10-16, $0)
+- **The Volume matches local:**
+  - `raft/datasets/pilot/{train,dev,test,probe}.jsonl` are byte-identical (sha256) to the local sets;
+  - the three `-000` val shards are identical to those behind the local baseline;
+  - `checkpoints/ckpt.pt` is present (1.4 GiB).
+- **All 9 sweep mixes and the curve points are buildable** with exact refusal shares (0.150 / 0.250 /
+  0.350). At 15% and 35% the pool is exactly exhausted for A, or for B1/B2/B3, by design.
+- **Per run:** 26 SFT + 6 replay rows per micro-batch, accumulation 2. At 2,000 examples that is
+  39 steps/epoch, 312 steps maximum and 20.4M tokens; across the whole sweep ≈ 220M tokens.
+- **Changes:**
+  - the container guard's per-run estimate is raised from 90 s to 120 s (the revised estimate is
+    ~95 s per run);
+  - the replay-ratio wording is corrected (≈ 1 per 4.3 rows; the loss share is unchanged at ≈ 20%).
 

@@ -100,7 +100,7 @@ def pilot_sweep(max_usd: float, compile: bool = True) -> dict:
     net = torch.compile(raw) if compile else raw
     base_cfg = sft.RunConfig(epochs=config.SFT.pilot_max_epochs, gpu=config.SFT.gpu, max_usd=max_usd,
                              log_every=10_000)
-    run_cost = 90 * _rate_per_s()                                      # one 2,000-example run, measured upper bound
+    run_cost = 120 * _rate_per_s()                                     # one 2,000-example run (~95 s estimated) + margin
     budget_ok = lambda: spent() + run_cost < max_usd - 0.6            # keep room for the final guards
     S = config.SFT
     grid = [{"n": S.pilot_size, "lr": lr, "refusal_share": r} for lr in S.sweep_lrs for r in S.sweep_refusal_shares]

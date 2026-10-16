@@ -109,33 +109,38 @@ def build_passages(corpus_file: Path, source: str, rate: float, tokenizer, out_d
 
 
 def select_candidates(val_rows: list[dict], n_total: int = DEVTEST_CANDIDATES,
-                      seed: int = config.RAFT.seed) -> list[dict]:
+                      seed: int = config.RAFT.seed,
+                      per_doc_cap: dict[str, int] | None = None) -> list[dict]:
     """Stratified dev/test source candidates: source mix 40/40/20, dev:test 1:2 by document,
-    at most MAX_SOURCES_PER_DOC per document, SEC 'numeric' passages ~10% of SEC picks."""
+    a global per-document cap (default MAX_SOURCES_PER_DOC), and SEC 'numeric' passages
+    filled first up to ~10% of SEC picks so numeric questions survive."""
     import random
 
     rng = random.Random(seed)
+    caps = per_doc_cap or {}
     picked: list[dict] = []
-    per_doc: Counter = Counter()        # global: a document never exceeds the cap
+    per_doc: Counter = Counter()        # global: a document never exceeds its cap
     for source, share in config.RAFT.source_mix:
+        cap = caps.get(source, MAX_SOURCES_PER_DOC)
         for devtest, frac in (("dev", 1 / 3), ("test", 2 / 3)):
             want = round(n_total * share * frac)
             pool = [r for r in val_rows if r["pid"].startswith(source + "/")
                     and r["devtest"] == devtest and r["elig"]]
             rng.shuffle(pool)
             quota_numeric = round(want * 0.10) if source == "sec" else 0
-            got, got_numeric = [], 0
-            for r in pool:
-                if len(got) >= want:
-                    break
-                if per_doc[r["doc"]] >= MAX_SOURCES_PER_DOC:
-                    continue
-                if r["elig"] == "numeric":
-                    if got_numeric >= quota_numeric:
+            numeric = [r for r in pool if r["elig"] == "numeric"]
+            clean = [r for r in pool if r["elig"] == "clean"]
+            got: list[dict] = []
+            for group, limit in ((numeric, quota_numeric), (clean, want)):
+                taken = 0
+                for r in group:
+                    if len(got) >= want or taken >= limit:
+                        break
+                    if per_doc[r["doc"]] >= cap:
                         continue
-                    got_numeric += 1
-                per_doc[r["doc"]] += 1
-                got.append(r)
+                    per_doc[r["doc"]] += 1
+                    got.append(r)
+                    taken += 1
             picked.extend(got)
     return picked
 
@@ -151,7 +156,7 @@ def leak_scan(corpus_file: Path, candidates: list[dict], n: int = config.RAFT.le
         for pos, h in enumerate(R.ngram_hash_list(R.word_list(row["text"]), n)):
             index[h].append((c, pos))
     keys = set(index)
-    hits: dict[int, set[int]] = defaultdict(set)
+    hits: dict[int, int] = defaultdict(int)          # bitmask of hit n-gram positions
     train_docs = 0
     with corpus_file.open(encoding="utf-8") as fh:
         for line in fh:
@@ -161,22 +166,22 @@ def leak_scan(corpus_file: Path, candidates: list[dict], n: int = config.RAFT.le
             train_docs += 1
             for h in keys.intersection(R.ngram_hash_list(R.word_list(text), n)):
                 for c, pos in index[h]:
-                    hits[c].add(pos)
-    return {"train_docs": train_docs, "hits": {str(c): sorted(p) for c, p in hits.items()}}
+                    hits[c] |= 1 << pos
+    return {"train_docs": train_docs, "hits": dict(hits)}
 
 
 def leak_fractions(candidates: list[dict], shard_results: list[dict],
                    n: int = config.RAFT.leak_ngram) -> list[float]:
     import raft_data as R
 
-    union: dict[int, set[int]] = defaultdict(set)
+    union: dict[int, int] = defaultdict(int)
     for res in shard_results:
-        for c, positions in res["hits"].items():
-            union[int(c)].update(positions)
+        for c, mask in res["hits"].items():
+            union[int(c)] |= mask
     fracs = []
     for c, row in enumerate(candidates):
         total = max(1, len(R.word_list(row["text"])) - n + 1)
-        fracs.append(len(union.get(c, ())) / total)
+        fracs.append(union.get(c, 0).bit_count() / total)
     return fracs
 
 
@@ -239,14 +244,15 @@ def passages_shard(source: str, shard_name: str) -> dict:
     return {**res, "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 8.0}
 
 
-@app.function(image=image, volumes=VOLUMES, timeout=60 * 40, cpu=2.0, memory=8_192)
-def leak_scan_shard(source: str, shard_name: str) -> dict:
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 40, cpu=2.0, memory=16_384)
+def leak_scan_shard(source: str, shard_name: str,
+                    candidates_file: str = "devtest/candidates.jsonl") -> dict:
     t0 = time.time()
     volume.reload()
-    candidates = _jsonl(RAFT / "devtest" / "candidates.jsonl")
+    candidates = _jsonl(RAFT / candidates_file)
     res = leak_scan(Path(config.CORPUS_DIR, source, shard_name), candidates)
     return {**res, "source": source, "shard": shard_name,
-            "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 8.0}
+            "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 16.0}
 
 
 @app.function(image=image, volumes=VOLUMES, timeout=60 * 40, cpu=2.0, memory=16_384)
@@ -309,6 +315,82 @@ def prepare_driver() -> dict:
     (RAFT / "reports" / "7.2.json").write_text(json.dumps(report, indent=2, default=dict))
     volume.commit()
     return json.loads(json.dumps(report, default=dict))
+
+
+# ------------------------------------------------- 7.2 diagnostics (after the first run)
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 30, cpu=2.0, memory=16_384)
+def bm25_miss_diag(split: str, source: str, probes: int = 500) -> dict:
+    """Why do BM25 probes miss? For each miss: the target's rank in the top 10, and the
+    word-5-gram Jaccard between the target and the top-1 passage (near-duplicate or not)."""
+    import random
+
+    import bm25s
+
+    import raft_data as R
+
+    t0 = time.time()
+    rows = [r for f in sorted((RAFT / "passages" / split / source).glob("*.jsonl")) for r in _jsonl(f)]
+    texts = [r["text"] for r in rows]
+    retriever = bm25s.BM25.load(str(RAFT / "bm25" / f"{split}-{source}"))
+    rng = random.Random(config.RAFT.seed)
+    queries, targets = [], []
+    for i in rng.sample(range(len(rows)), probes):
+        sents = [texts[i][a:b].strip() for a, b in R.sentence_spans(texts[i])]
+        sents = [x for x in sents if len(x.split()) >= 8]
+        if sents:
+            queries.append(max(sents, key=len))
+            targets.append(i)
+    docs, _ = retriever.retrieve(bm25s.tokenize(queries, stopwords="en", show_progress=False),
+                                 k=10, show_progress=False)
+    sh = lambda t: set(R.ngram_hash_list(R.word_list(t), 5))
+    misses = []
+    for j, t in enumerate(targets):
+        top = int(docs[j, 0])
+        if texts[top] == texts[t] or queries[j] in texts[top]:
+            continue
+        ranks = [int(d) for d in docs[j]]
+        misses.append({"rank": ranks.index(t) + 1 if t in ranks else None,
+                       "jaccard_top1": round(R.jaccard(sh(texts[t]), sh(texts[top])), 3),
+                       "same_doc": rows[t]["doc"] == rows[top]["doc"],
+                       "query": queries[j][:160], "top1": texts[top][:160]})
+    return {"split": split, "source": source, "probes": len(targets), "misses": misses,
+            "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 16.0}
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=60 * 60, cpu=1.0, memory=16_384)
+def diagnose_driver() -> dict:
+    """Leak fractions for EVERY source-eligible SEC val passage (plus the existing case-law
+    and web candidates), and the SEC BM25 misses."""
+    t0 = time.time()
+    rows = [r for f in sorted((RAFT / "passages" / "val" / "sec").glob("*.jsonl")) for r in _jsonl(f)
+            if r["elig"]]
+    old = [r for r in _jsonl(RAFT / "devtest" / "candidates.jsonl") if not r["pid"].startswith("sec/")]
+    cands = rows + old
+    _write_jsonl(RAFT / "devtest" / "leak_diag_candidates.jsonl", cands)
+    volume.commit()
+    shards = _corpus_shards()
+    res = list(leak_scan_shard.starmap([(s, n, "devtest/leak_diag_candidates.jsonl")
+                                        for s, n in shards]))
+    fracs = leak_fractions(cands, res)
+    _write_jsonl(RAFT / "devtest" / "leak_diag.jsonl",
+                 ({"pid": r["pid"], "doc": r["doc"], "devtest": r["devtest"], "elig": r["elig"],
+                   "tokens": r["tokens"], "leak_fraction": f} for r, f in zip(cands, fracs)))
+    bm = [bm25_miss_diag.remote("val", "sec"), bm25_miss_diag.remote("train", "sec")]
+    volume.commit()
+    cost = sum(r["seconds"] * (r["cpu"] * CPU_RATE + r["mem_gib"] * MEM_RATE) for r in res + bm)
+    cost += (time.time() - t0) * (CPU_RATE + 16 * MEM_RATE)
+    return {"candidates": len(cands), "sec_candidates": len(rows), "bm25": bm,
+            "cost_usd_estimate": round(cost, 4), "wall_seconds": round(time.time() - t0, 1)}
+
+
+@app.local_entrypoint()
+def diagnose(confirm: bool = False):
+    """7.2 diagnostics (paid, within the approved 7.2 cap). Requires --confirm."""
+    if not confirm:
+        raise SystemExit("Costs money (Modal CPU). Re-run with --confirm once approved.")
+    out = diagnose_driver.remote()
+    Path(".smoke/reports/raft_7.2_diag.json").write_text(json.dumps(out, indent=2))
+    print(json.dumps({k: v for k, v in out.items() if k != "bm25"}, indent=1))
 
 
 @app.local_entrypoint()

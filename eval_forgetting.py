@@ -204,6 +204,7 @@ def main() -> None:
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     p.add_argument("--limit", type=int, default=0, help="score only the first N CaseHOLD items")
     p.add_argument("--skip-casehold", action="store_true")
+    p.add_argument("--skip-heldout", action="store_true")
     args = p.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -213,12 +214,13 @@ def main() -> None:
     net = AutoModelForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.float32).to(device)
     report: dict = {"model_dir": args.model_dir, "device": args.device, "dtype": "float32"}
 
-    t0 = time.time()
-    subset = heldout_subset(Path(args.val_dir))
-    report["heldout"] = heldout_bpb(net, tok, Path(args.val_dir), subset, device)
-    report["heldout_subset"] = {k: {kk: v[kk] for kk in ("shard", "windows_in_shard", "sha256")}
-                                for k, v in subset.items()}
-    print(f"[heldout] {time.time() - t0:.0f}s " + json.dumps(report["heldout"], indent=1), flush=True)
+    if not args.skip_heldout:
+        t0 = time.time()
+        subset = heldout_subset(Path(args.val_dir))
+        report["heldout"] = heldout_bpb(net, tok, Path(args.val_dir), subset, device)
+        report["heldout_subset"] = {k: {kk: v[kk] for kk in ("shard", "windows_in_shard", "sha256")}
+                                    for k, v in subset.items()}
+        print(f"[heldout] {time.time() - t0:.0f}s " + json.dumps(report["heldout"], indent=1), flush=True)
 
     if not args.skip_casehold:
         items = fetch_casehold(Path(args.casehold_cache))

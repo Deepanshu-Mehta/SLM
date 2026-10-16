@@ -234,6 +234,26 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 
 → `docs/08-raft.md` (review edits applied)
 
+### E-20 · Step 7.2: passage pools and the SEC leakage finding (2026-10-16)
+- **Pools:** 141,189 val + 753,575 train passages; train distractor pools of ~250K per source;
+  6 BM25 indexes. Cost ≈ $0.19 for the run and its diagnosis.
+- **The SEC val split is largely near-duplicate of training text.**
+  - 61% of the 56,873 source-eligible SEC val passages share ≥ 50% of their 13-grams with train
+    documents, and 27% share ≥ 90%. The per-document median is 0.69.
+  - Comparable figures: case law ~19% of candidates over 10%; web ~3%.
+  - **Cause:** annual filings of one company restate the previous year's text. Phase 2's exact dedup
+    was per shard, and its LSH catches only 29% of pairs at J = 0.8 (E-16).
+  - **Consequence:** the base model's SEC held-out 0.463 bits/byte (E-13) is optimistic. Part of it
+    is reproduction of near-duplicate filings.
+  - **Phase 7 handling:** dev/test passages must have < 10% 13-gram overlap with the whole train
+    corpus. 9,916 SEC passages from 369 of 428 documents qualify. The dev/test pool (2,000 passages,
+    40/40/20, 1,332 documents) is built only from those.
+- **BM25 sanity:** top-1 ≥ 95% held for case law and web but **failed for SEC** (92.4% / 93.6%).
+  Top-10 recall is 99.6% / 98.6%. The misses are generic boilerplate sentences shared across
+  filings, not index faults.
+- **Local MPS limits:** a full CaseHOLD run on the 8.6 GB Mac swapped to 9.3 GB and stalled. It was
+  stopped; the official baselines are measured in the GPU container.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -255,6 +275,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-15 | 10-05 | Phase 7 plan (recommendation, not yet executed): **direct RAFT with teacher-written, quote-grounded targets**; refuse when the correct passage is missing; $0 baseline first; ~2K-example pilot | 125M params can't absorb a teacher's knowledge; logit distillation is impossible (different vocabulary); 1,024-token context; chat format never seen |
 | D-16 | 10-16 | Phase 7 setup (user's choice): **`deepseek-flash` writes and checks, off-peak; `gemini-3.8-flash` is the independent checker; 10K training examples; pre-filter source passages; thinking only on refusal-label checks**; ≈ $20 | E-18: about 4× cheaper than Gemini + Sonnet at 20K. DeepSeek's terms allow training on outputs. Quality is protected by two-family agreement on dev/test labels, the 5% audit, and incremental top-up if targets are missed |
 | D-17 | 10-16 | Phase 7 review fixes (user-approved patch): SFT and replay losses normalised separately (λ = 0.25, per-token within SFT); rows 4–6 sampled from N(μ, Σ); dev/test leakage scanned against the whole pretraining corpus; paired A/B1 with same-document distractors; C-bucket placeholder and V2 check; DeepSeek thinking explicitly off, with `max_tokens` caps; per-bucket audit fallback (≤ $3); pilot compiled once | E-19. Net cost ≈ $0; estimate stays ≈ $20 |
+| D-18 | 10-16 | Keep the 10% leak rule; build the dev/test pool only from leak-scanned passages (SEC per-document cap 3, numeric quota filled first); record the SEC BM25 top-1 check as failed-and-explained (top-10 recall 99.6%) | E-20: relaxing the rule would let near-copies of training filings into the test; enough clean SEC passages exist |
 
 ## Corrections log
 
@@ -269,3 +290,4 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | C-07 | — | A blind `git add -A` once committed an unnoticed deletion of the user's `initial.txt` | That's why staging is now explicit; the file was later removed from history (D-14) |
 | C-08 | HF model card linked `Deepanshu027/slm-125m-api` | Links the live website and Modal API | That Space was never created (E-14) |
 | C-09 | Stream events counted as tokens | The true count comes in the `done` event | E-14 |
+| C-10 | SEC held-out 0.463 bits/byte read as generalisation | Optimistic: 61% of SEC val passages share ≥ 50% of their 13-grams with training filings | E-20 |

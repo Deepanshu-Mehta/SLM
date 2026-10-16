@@ -695,7 +695,7 @@ recorded in `.smoke/reports/raft_baseline_local.json`.
 - These are sanity numbers. The **official** before/after pair is measured in the GPU container
   (§5, step 7.1).
 
-### 7.2 Code written and tested locally (not yet run on Modal)
+### 7.2 Code written and tested locally
 - **New files:** `raft_data.py` (pure helpers) and `raft_app.py` (Modal: a remote driver, pass 1
   over 20 corpus shards, candidate selection, a leakage scan over 20 shards, 6 BM25 indexes).
 - **`smoke_raft.py` passes 25/25 on 99 real documents.** Three problems were found and fixed:
@@ -709,3 +709,55 @@ recorded in `.smoke/reports/raft_baseline_local.json`.
   tokens (6,345 passages; max 163). The 1,024 limit is enforced per formatted example.
 - **Leakage scan:** passages copied from train documents score 1.00; novel text scores 0.00.
 - **Throughput:** 3.4M n-grams/s locally, so the whole-corpus scan is ≈ 12 CPU-minutes.
+
+### 7.2 Passage pools, leakage scan, BM25: DONE (2026-10-16, ≈ $0.19 of the $1 cap)
+**First run.** `modal run --detach raft_app.py::prepare --confirm`: 218 s, ≈ $0.09; 0 containers
+left afterwards.
+
+| Output | Result |
+|---|---|
+| Passages | **141,189 val** (all val documents) + **753,575 train** (pool sample: 4.9% of case-law, 4.0% of SEC, 7.5% of web documents) |
+| Train distractor pools | 251,710 case law / 252,941 SEC / 248,924 web |
+| Length | every passage 60–160 tokens by offset count (histogram in `reports/7.2.json`) |
+| Source-eligible | case law 94% / SEC 95% / web 99%. On Modal (Debian word list) the case-law OCR tag fires on 0.3% of passages, against 22% with the macOS list, which confirms the OCR fix |
+| BM25 top-1 probe (bar 95%) | case law 98.6 / 99.2%, web 100 / 99.6% ✅. **SEC 92.4% (train) / 93.6% (val) ❌** |
+| Dev/test candidates | 2,656 of 3,000 (SEC short: 2 per document × 428 SEC val documents) |
+| Leakage scan (bar < 10% of 13-grams in train) | **981 of 2,656 failed (37%): SEC 736 of 856 (86%)**, case law 227 of 1,200 (19%), web 18 of 600 (3%) |
+
+**Diagnosis.** `raft_app.py::diagnose`, 216 s, ≈ $0.11; two container preemptions were absorbed by
+restarts.
+
+- **Leakage, measured on all 56,873 source-eligible SEC val passages:**
+
+  | Overlap with train | Passages |
+  |---|---|
+  | 0 | 6,077 |
+  | < 10% | 9,916 in total (17.4%) |
+  | 50–90% | 19,098 |
+  | ≥ 90% | 15,395 |
+
+  - The per-document median overlap is 0.69.
+  - **The SEC val split is mostly near-copies of training filings**: same company, another year.
+    Phase 2's exact dedup was per shard, and its LSH catches only 29% of pairs at J = 0.8.
+  - The clean 9,916 still come from 369 of the 428 SEC val documents, so **the 10% rule is kept**,
+    not relaxed.
+- **BM25 SEC misses are not index faults.**
+  - The target was in the top 10 for 30 of 32 val misses (**99.6% top-10 recall**; train 98.6%).
+  - Only 1 miss had a near-duplicate top-1. The misses are generic boilerplate queries ("SFAS No.
+    109…", "not engaged in any material litigation…") that many filings share, so the "longest
+    sentence identifies its passage" probe can't work for them.
+  - **The top-1 bar fails as defined for SEC.** The index is verified correct by top-10 recall; the
+    check is recorded as failed-and-explained, not silently passed.
+
+**Fix: the dev/test source pool is rebuilt from scanned passages only.**
+- Every candidate has a measured leak fraction < 10%: max 0.099, and 72% have exactly 0.
+- **2,000 passages:** 40/40/20 (case law 800 / SEC 800 / web 400), dev:test 1:2 by document, no
+  document in both.
+- **1,332 distinct documents** (650 / 314 / 368). The per-document cap is 2, or 3 for SEC, which has
+  fewer documents.
+- **SEC numeric passages are exactly 10%;** selection now fills the numeric quota first.
+- Written to `raft/devtest/source_pool.jsonl`; the v1 pool is kept locally.
+
+**Consequence beyond Phase 7 (E-20).** The base model's SEC held-out score (0.463 bits/byte) is
+optimistic: most SEC "held-out" text shares substantial n-grams with training filings.
+

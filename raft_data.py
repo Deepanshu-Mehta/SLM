@@ -241,10 +241,16 @@ def _content(words: list[str]) -> list[str]:
     return [w for w in words if w not in _STOP]
 
 
+_VAGUE = re.compile(r"\b(?:the|this) (?:passage|text|excerpt|paragraph)\b|"
+                    r"\bthis (?:case|filing|opinion|document)\b", re.I)
+
+
 def check_question(question: str, passage: str) -> str:
     words = question.split()
     if not 5 <= len(words) <= 40:
         return "question_length"
+    if _VAGUE.search(question):          # the student sees 4 passages: "the passage" is ambiguous
+        return "question_vague_reference"
     # no run of >= 6 consecutive words copied from the passage, not counting name tokens
     toks = [None if (i > 0 and w[:1].isupper()) else w.lower().strip(".,;:?!()\"'")
             for i, w in enumerate(words)]
@@ -411,3 +417,19 @@ def encode_example(tokenizer, prompt: str, target: str) -> tuple[list[int], list
     p = tokenizer.encode(prompt, add_special_tokens=False)
     t = tokenizer.encode(target, add_special_tokens=False)
     return p + t, [-100] * len(p) + t
+
+
+def render_example(row: dict) -> tuple[str, str]:
+    """(prompt, target) for an assembled row of any bucket; the single definition of §4."""
+    passages = row.get("passages") or []
+    b = row["bucket"]
+    if b in ("B1", "B2", "B3"):
+        return format_prompt(passages, question=row["question"]), format_target(None)
+    if b == "A":
+        return (format_prompt(passages, question=row["question"]),
+                format_target(row["k"], row["answer"], quote=row["quote"]))
+    prompt = format_prompt(passages, task=row["task_text"])
+    if row["task"] == "yes_no_check":
+        return prompt, format_target(row["k"], f"{row['yes_no']}.", quote=row["quote"])
+    return prompt, format_target(row["k"], row["response"])
+

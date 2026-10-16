@@ -19,15 +19,18 @@ Rules:
 1. The answer must be stated explicitly in the passage, in so many words. No outside knowledge
    and no inference (the checker rejects anything implied).
 2. Each question must be self-contained and specific: name the party, company, court, statute,
-   period or amount it concerns, using names that appear in the passage. Someone reading a
-   different passage on a similar topic must not be able to answer it.
-3. Paraphrase. Apart from names, never copy more than 5 consecutive words of the passage into
-   the question.
+   period or amount it concerns, using the names the passage gives (not just "the defendant" or
+   "the Company" when a name is given). The reader will see several passages, so never write
+   "the passage", "the text" or "this case". Someone reading a different passage on a similar
+   topic must not be able to answer it.
+3. Paraphrase: rewrite the question in your own words. Apart from names, never copy 5 or more
+   consecutive words of the passage into the question.
 4. "quote" is the shortest exact span of the passage (at most 40 words, copied character for
    character) that contains the answer.
 5. "answer" is at most 30 words, direct, and consistent with the quote. Copy numbers, dates and
    names exactly as written.
-6. Vary "type" across: fact, number_or_date, party_or_entity, rule_or_holding, definition, yes_no.
+6. "type" is one of: fact, number_or_date, party_or_entity, rule_or_holding, definition, yes_no.
+   Item 1 uses the type requested below if the passage supports it; item 2 uses a different type.
    A yes_no answer may be "No" when the passage states the opposite.
 7. If the passage is boilerplate, a table fragment, a list of citations, garbled OCR, or lacks
    the context for a specific question, return {{"items": []}}.
@@ -45,7 +48,8 @@ such question is possible."""
 
 G3_SYSTEM = """You write instructions for a model that must work ONLY from passages it is given.
 Write ONE instruction of type {task} that can be completed using only this passage, and its ideal
-response. Refer to the passage only as "the passage" (it will be replaced with its number).
+response. The instruction must contain the exact words "the passage" (they will be replaced with
+the passage's number); never name or describe the passage any other way.
 - summarize: the instruction asks for a one-sentence summary; response at most 35 words, with no
   fact that is not in the passage.
 - extract_list: the instruction asks for all parties, dates, amounts, or defined terms of one
@@ -56,7 +60,12 @@ response. Refer to the passage only as "the passage" (it will be replaced with i
 
 Reply with JSON only: {{"instruction": "...", "response": "...", "quote": "..." or null}}"""
 
-GEN_USER = 'Source: {source_desc}\nPassage:\n"""{passage}"""'
+GEN_USER = 'Source: {source_desc}\n{hint}Passage:\n"""{passage}"""'
+# Item-1 type requested per G1 call, rotated per source (trial 7.3: 45% of questions were
+# number_or_date and only 10% rule_or_holding).
+TYPE_ROTATION = {"case-law": ("rule_or_holding", "party_or_entity", "fact", "yes_no"),
+                 "sec": ("number_or_date", "fact", "party_or_entity", "yes_no"),
+                 "fineweb-edu": ("definition", "fact", "number_or_date")}
 
 # -------------------------------------------------------------------------- checkers
 V1_SYSTEM = """You check training examples for a model that must answer only from the passages it is given.
@@ -64,7 +73,7 @@ Using ONLY the passages below (no outside knowledge), decide:
 - answerable: true only if at least one passage explicitly states the answer. Partial, implied
   or "probably" answers count as false.
 - support: the numbers of every passage that states the answer on its own.
-- answer: the answer in at most 30 words if answerable, else null.
+- answer: if answerable, the answer as briefly as possible (a few words, not a sentence), else null.
 - quote: if answerable, the shortest exact span (at most 40 words) of the first supporting
   passage that states the answer, copied character for character; else null.
 - ambiguous: true if the question is unclear, or could refer to different things in different
@@ -92,12 +101,15 @@ def passages_block(passages: list[str]) -> str:
     return "\n".join(f"Passage {i}: {p}" for i, p in enumerate(passages, 1))
 
 
-def gen_messages(kind: str, source: str, passage: str, task: str | None = None) -> tuple[str, str]:
-    """(system, user) for G1 / G2 / G3."""
+def gen_messages(kind: str, source: str, passage: str, task: str | None = None,
+                 type_hint: str | None = None) -> tuple[str, str]:
+    """(system, user) for G1 / G2 / G3. The G1 type request goes in the user part so the
+    system part stays identical (cacheable) across calls."""
     desc = SOURCE_DESC[source]
     system = {"G1": G1_SYSTEM, "G2": G2_SYSTEM, "G3": G3_SYSTEM}[kind]
     system = system.format(source_desc=desc, task=task or "")
-    return system, GEN_USER.format(source_desc=desc, passage=passage)
+    hint = f"Requested type for item 1: {type_hint}\n" if kind == "G1" and type_hint else ""
+    return system, GEN_USER.format(source_desc=desc, hint=hint, passage=passage)
 
 
 def v1_messages(passages: list[str], question: str) -> tuple[str, str]:

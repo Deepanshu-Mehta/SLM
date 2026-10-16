@@ -192,7 +192,9 @@ class DeepSeek:
                 parsed, err = None, "bad_json"
             return {"key": job.key, "ok": parsed is not None, "json": parsed, "error": err,
                     "finish": r.choices[0].finish_reason, "tokens": tokens, "cost": cost,
-                    "seconds": round(time.time() - t0, 2), "thinking": job.thinking}
+                    "seconds": round(time.time() - t0, 2), "thinking": job.thinking,
+                    "ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                    "peak": is_peak()}
         self.ledger.release(worst)
         return {"key": job.key, "ok": False, "json": None, "error": last_err, "tokens": {},
                 "cost": 0.0, "thinking": job.thinking}

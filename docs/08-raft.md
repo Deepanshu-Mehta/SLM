@@ -861,3 +861,78 @@ rules because of a bug in `answers_agree`, not in the labels.
 2. G3: the instruction must literally say "the passage".
 3. V1: "answer as briefly as possible: a few words, not a sentence".
 
+### 7.4 Pilot data: DONE except the user's spot-check (2026-10-16, **$1.81** of the $4 cap)
+**Review of 7.0–7.3 before running.** The aggregate numbers hid two data problems in the trial
+output:
+- **Vague references.** 9% of accepted questions said "the passage" or "the text", which is
+  ambiguous when the student sees 4 passages; 20% referred to an unnamed party.
+  → Mechanical rule `question_vague_reference`, plus a G1 instruction to use the names the passage
+  gives.
+- **Skewed question mix.** 45% of questions were `number_or_date` and only 10% `rule_or_holding`.
+  → A per-call requested type, rotated by source, placed in the user message so the system prompt
+  stays cacheable.
+
+The three trial fixes were also applied: stricter paraphrase in G1, the literal "the passage" in G3,
+and brief V1 answers. The cap was lowered from $10 to $4 after the re-quote.
+
+**Run** (Fri 12:43–13:40 UTC, off-peak; enforced by the guard, but per-call timestamps were not
+recorded, so `ts`/`peak` fields are added from now on).
+
+| Step | Result | Cost |
+|---|---|---|
+| Sources | 3,964: train 2,310 + probe 100 (train documents, trial excluded) + dev 519 + test 1,035 (from the leak-checked pool). 0 overlaps with the trial; 0 dev/test documents shared | ≈ $0.002 |
+| Generation (DeepSeek) | 3,963 of 3,964 OK | $0.448 |
+| Mechanical | G1 2,622 of 4,383 items (60%); G2 519 of 673 (77%); G3 942 of 1,030 (91%). G1 drops: **copied ≥ 6 words 26.2%** (trial 22.8%: the stricter prompt did not help; samples confirm genuine copying) and vague references 9.6% (new rule). G3 placeholder misses 0 (trial 4/25) | $0 |
+| Assembly | 4,953 of 4,963 | ≈ $0.005 |
+| DeepSeek checks | 4,635 of 4,636 | ≈ $0.62 |
+| Gemini checks (dev/test/probe) | 1,979 of 1,979, in 3 batches of ≤ 800 | $0.737 |
+
+- **The guard refused the first Gemini submission.** Its worst case was $4.62 with 1,024
+  output tokens per request, against $2.93 remaining. No money was spent. Fixed with
+  `max_output_tokens` 384 (trial maximum 202) and 800-request chunks.
+- **Dev/test refusal pairs.** These need both twins accepted by both checkers (~0.67 per pair), so
+  B1 pairing was raised to 120 (dev) and 240 (test) candidates before checking.
+
+**Keep rates** (accepted / assembled):
+
+| Group | A | B1 | B2 | C |
+|---|---|---|---|---|
+| Train | 88% | 88% | 88% | 99% |
+| Dev | 90% | 90% | 91% | 100% |
+| Test | 90% | 93% | 82% | 95% |
+| Probe | | 88% | | |
+
+- By source, every group is 89–93%.
+- Dev/test A rose from the trial's 81% to 90%, which is the brief-answer fix.
+
+**Datasets** (`.smoke/raft/pilot/datasets/`, uploaded to `raft/datasets/pilot/`). **Every quota is
+filled exactly; no shortfall.**
+
+| Set | Contents |
+|---|---|
+| Train 2,400 | A 1,247 · B1 420 · B2 210 · B3 70 · C 453 (extract 157 / yes-no 137 / summary 159) |
+| Dev 500 | A 275 · B1 75 · B2 37 · B3 13 · C 100 |
+| Test 1,000 | A 500 · B1 150 · B2 100 · B3 50 · C 200. **150 B1 items each paired with its A twin** |
+| Probe | 100 B1 items from pretrained-on documents |
+
+- **Balance:**
+  - Source mix ≈ 40/40/20.
+  - Oracle positions are balanced (train 419/423/422/436).
+  - Entity present in B1: 70–76% (target ≥ 50%).
+  - Max length 773 tokens.
+  - Train A yes/no answers: 101 Yes / 75 No.
+- **Train A types:**
+
+  | Type | Share |
+  |---|---|
+  | number_or_date | 29% |
+  | fact | 27% |
+  | party_or_entity | 18% |
+  | yes_no | 14% |
+  | rule_or_holding | 6% |
+  | definition | 6% |
+
+  The type request raised yes/no from 4% to 14%, but `rule_or_holding` stayed low (6%):
+  DeepSeek often ignores the request.
+- **Pending: the user's spot-check** of 50 dev/test items in `.smoke/raft/pilot/spot_check.md`.
+

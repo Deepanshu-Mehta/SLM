@@ -247,6 +247,12 @@ def teacher_output_checks(tok) -> None:
     check("G1: question copying 6+ passage words rejected",
           R.check_question("Did they report net revenues of $4.2 million for fiscal 2019?", passage)
           == "question_copies_passage")
+    check("G1: vague references ('the passage', 'this case') rejected",
+          R.check_question("What amount is reported in the passage for fiscal 2019?", passage)
+          == "question_vague_reference"
+          and R.check_question("What did the court hold in this case about timeliness?", passage)
+          == "question_vague_reference"
+          and R.check_question("What revenue did Acme Corp. report for fiscal 2019?", passage) == "")
     check("G1: a long name span is not counted as copying",
           R.check_question("Was the Federal Deposit Insurance Corporation Of The United States involved?",
                            passage) == "")

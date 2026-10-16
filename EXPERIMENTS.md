@@ -288,6 +288,23 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Main generation loss:** questions copying ≥ 6 passage words (DeepSeek 23% of items, Gemini 12%).
 - **Re-quote:** 7.4 ≈ $1.90; 7.8 ≈ $2.51; Phase 7 ≈ $7 (was $20).
 
+### E-23 · Step 7.4 pilot data (2026-10-16, $1.81 of the $4 cap)
+- **Datasets:** 2,400 train / 500 dev / 1,000 test (150 A/B1 pairs) / 100 probe. Every quota was
+  filled exactly.
+- **Fixes applied first (review of the trial data):**
+  - a vague-reference rule (9% of trial questions said "the passage");
+  - a per-call requested question type;
+  - stricter paraphrase in G1, the literal "the passage" in G3, brief V1 answers.
+- **Funnel:**
+  - G1 60% pass. Copying ≥ 6 words rose to 26.2% (the prompt did not fix it); vague references 9.6%.
+  - G3 91% (placeholder misses 4/25 → 0).
+- **Keep rates:** train 88–99%; dev/test 82–100%. Dev/test A rose from 81% (trial) to 90%.
+- **Budget guard refused a Gemini batch** whose worst case was $4.62 (1,024 output tokens per
+  request). Nothing was spent. Fixed with a 384-token cap (measured maximum 202) and 800-request
+  chunks.
+- **Type mix (train A):** number 29% / fact 27% / party 18% / yes-no 14% / rule-holding 6% /
+  definition 6%. The rule-holding type request is largely ignored.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

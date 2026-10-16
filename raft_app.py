@@ -329,20 +329,10 @@ class ContextBuilder:
         rng.shuffle(rows)
         k = rows.index(oracle) + 1 if bucket in ("A", "C", "B2") else None
         passages = [r["text"] for r in rows]
-        if bucket == "A":
-            prompt = R.format_prompt(passages, question=cand["question"])
-            target = R.format_target(k, cand["answer"], quote=cand["quote"])
-        elif bucket in ("B1", "B2"):
-            prompt = R.format_prompt(passages, question=cand["question"])
-            target = R.format_target(None)
-        else:
+        if bucket == "C":
             task = re.sub(r"\bthe passage\b", f"Passage {k}", cand["instruction"], count=1, flags=re.I)
             cand = {**cand, "task_text": task}
-            prompt = R.format_prompt(passages, task=task)
-            if cand["task"] == "yes_no_check":
-                target = R.format_target(k, f"{cand['yes_no']}.", quote=cand["quote"])
-            else:
-                target = R.format_target(k, cand["response"])
+        prompt, target = R.render_example({**cand, "passages": passages, "k": k})
         n_tokens = len(self.tok.encode(prompt + target, add_special_tokens=False))
         if n_tokens > config.SEQ_LEN:
             return None, "too_long"

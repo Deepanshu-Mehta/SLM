@@ -194,8 +194,109 @@ def projected_cost_usd(gpu_seconds_per_gpu: float, gpu: str = PRETRAIN_GPU,
     """Spend for a wall-clock duration, including Modal's CPU/memory overhead."""
     return gpu_seconds_per_gpu * gpu_count * GPU_RATE_PER_SEC[gpu] * COST_OVERHEAD_FACTOR
 
+# ---- Phase 7: grounded SFT / RAFT (docs/08-raft.md) --------------------------------
+RAFT_DIR = f"{DATA_ROOT}/raft"
+RAFT_INIT_CKPT = RESUME_CKPT_PATH        # fp32 Phase 5 weights; load state["model"] only
+
+
+@dataclass(frozen=True)
+class RaftConfig:
+    """Data recipe. Ratios are shares of the training examples (docs/08-raft.md §3)."""
+
+    k_passages: int = 4
+    passage_min_tokens: int = 60
+    passage_max_tokens: int = 160
+    question_max_tokens: int = 48
+    target_max_tokens: int = 128
+    refusal: str = "The passages do not contain the answer."
+    # buckets: answerable / oracle removed (paired with A) / near miss / no context / tasks
+    mix: tuple[tuple[str, float], ...] = (
+        ("A", 0.55), ("B1", 0.15), ("B2", 0.075), ("B3", 0.025), ("C", 0.20))
+    source_mix: tuple[tuple[str, float], ...] = (
+        ("case-law", 0.40), ("sec", 0.40), ("fineweb-edu", 0.20))
+    train_examples: int = 10_000
+    pilot_train_examples: int = 2_400    # enough for 15/25/35% refusal mixes of 2,000
+    dev_examples: int = 500
+    test_examples: int = 1_000
+    dev_hash_mod: int = 3                # blake2b(text + "|dev") % 3 == 0 -> dev, else test
+    # distractors (§4.1 step 4)
+    distractor_pool_per_source: int = 250_000
+    same_doc_distractors_max: int = 2
+    bm25_sample_top: int = 20
+    oracle_jaccard_max: float = 0.5      # word 5-gram Jaccard vs the oracle
+    # dev/test leakage scan against the whole pretraining train corpus (§1)
+    leak_ngram: int = 13
+    leak_max_fraction: float = 0.10
+    # forgetting guards (§8.2)
+    eval_windows_per_source: int = 200
+    max_bpb_increase: float = 0.02
+    max_casehold_drop_points: float = 2.0
+    seed: int = 1337
+
+
+RAFT = RaftConfig()
+
+
+@dataclass(frozen=True)
+class TeacherConfig:
+    """Teacher / checker models and prices (USD per 1M tokens), checked 2026-10-06 to 10-15."""
+
+    writer: str = "deepseek-flash"              # DeepSeek-V4.1-Flash; OpenAI-compatible API
+    writer_base_url: str = "https://api.deepseek.com"
+    checker: str = "gemini-3.8-flash"           # Batch API
+    # DeepSeek off-peak prices; peak (below) is double
+    writer_in: float = 0.15
+    writer_cached_in: float = 0.003
+    writer_out: float = 0.60
+    writer_peak_multiplier: float = 2.0
+    # DeepSeek peak hours, UTC, Monday-Friday: [start, end)
+    peak_hours_utc: tuple[tuple[int, int], ...] = ((1, 4), (6, 10))
+    checker_batch_in: float = 0.375
+    checker_batch_out: float = 1.875
+    # per-request output caps (bound the worst case, §5.5)
+    max_tokens_generate: int = 600
+    max_tokens_check: int = 250
+    max_tokens_check_thinking: int = 2_500
+
+
+TEACHER = TeacherConfig()
+
+# Approved spend caps per paid stage (USD), docs/08-raft.md §9. Each needs explicit approval.
+RAFT_STAGE_CAPS_USD: Mapping[str, float] = {
+    "7.3-trial": 3.0, "7.4-pilot-data": 10.0, "7.6-pilot-gpu": 4.0,
+    "7.8-scale-data": 12.0, "7.8-full-gpu": 2.0,
+}
+
+
+@dataclass(frozen=True)
+class SFTConfig:
+    """Training recipe (docs/08-raft.md §7.1)."""
+
+    lr: float = 1e-4
+    sweep_lrs: tuple[float, ...] = (5e-5, 1e-4, 2e-4)
+    sweep_refusal_shares: tuple[float, ...] = (0.15, 0.25, 0.35)
+    curve_sizes: tuple[int, ...] = (500, 1_000)
+    pilot_size: int = 2_000
+    min_lr_fraction: float = 0.10
+    warmup_fraction: float = 0.03
+    batch_sequences: int = 64
+    micro_batch: int = 32
+    epochs: int = 3
+    pilot_max_epochs: int = 8
+    sft_per_replay: int = 4              # 1 replay window per 4 SFT sequences
+    replay_weight: float = 0.25          # lambda: L = L_sft + lambda * L_replay
+    weight_decay: float = 0.1
+    grad_clip: float = 1.0
+    max_new_tokens: int = 128
+    gpu: str = "H100"
+    gpu_count: int = 1
+    seed: int = 1337
+
+
+SFT = SFTConfig()
+
 STAGES: tuple[str, ...] = (
-    "setup", "clean", "dedup", "tokenizer", "tokenize", "pretrain", "deploy",
+    "setup", "clean", "dedup", "tokenizer", "tokenize", "pretrain", "deploy", "sft",
 )
 
 

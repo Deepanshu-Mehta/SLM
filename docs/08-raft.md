@@ -629,9 +629,10 @@ learning-curve check in §3.1 (more data or not).
 | `raft_app.py` | Modal: passage-pool fan-out (one worker per corpus shard, keeping the fan-out design), BM25 build, distractor mining, dataset assembly; SFT GPU entrypoints gated by `--confirm` |
 | `teacher.py` | local: concurrent DeepSeek calls (off-peak guard, retries, resumable JSONL) and Gemini batch jobs; spend ledger; keys read from `.env.local` and never logged |
 | `sft.py` | SFT trainer; imports helpers from `train.py`; its own loss (§7.1), per-source evaluation index lists, and a greedy `generation_config` written over `export_hf`'s |
-| `eval_raft.py`, `eval_casehold.py` | the metrics in §8 |
-| `smoke_sft.py` | the local checks for 7.5 |
-| `requirements.txt` | add `openai` (DeepSeek client), `google-genai`, `bm25s` (pinned) |
+| `eval_forgetting.py` | the forgetting guards: CaseHOLD and the per-source held-out bits/byte subset (§8.2, §8.4); importable by the GPU container |
+| `eval_raft.py` | the RAFT metrics in §8.1 |
+| `smoke_raft.py` | the local checks: data helpers and the 7.2 core now, the SFT checks of 7.5 later |
+| `requirements.txt` | add `bm25s==0.3.13` now (local tests); `openai` (DeepSeek client) and `google-genai` at 7.3 (pinned) |
 
 `cleaning.py`, `dedup.py` and `modal_app.py` are not touched.
 
@@ -667,4 +668,44 @@ learning-curve check in §3.1 (more data or not).
 
 ## 13. Results
 
-_Not started. Each step's measured results get recorded here._
+### 7.0 Configuration: DONE (2026-10-16, $0)
+`config.py` now holds `RAFT_DIR`, `RAFT_INIT_CKPT`, `RaftConfig`, `TeacherConfig`,
+`RAFT_STAGE_CAPS_USD` and `SFTConfig`; `"sft"` is added to `STAGES`.
+- **Checks:** the mixes sum to 1, the caps sum to $31, the batch divides into micro-batches,
+  `approx_params()` is still 125,848,320, and pyflakes is clean.
+
+### 7.1 Baselines, local sanity run (2026-10-16, $0)
+`eval_forgetting.py`, run on MPS in fp32, from the released bf16 weights (`.smoke/final/base`).
+
+**Held-out subset:** 200 seeded windows from each source's `-000` val shard; the shard sha256s are
+recorded in `.smoke/reports/raft_baseline_local.json`.
+
+| Source | Loss | Bytes/token | Bits/byte | E-13 (96 windows) |
+|---|---|---|---|---|
+| case law | 2.1745 | 4.512 | **0.6953** | 0.687 |
+| SEC | 1.5791 | 5.027 | **0.4532** | 0.463 |
+| web | 3.0685 | 4.344 | **1.0191** | 1.017 |
+| pooled (equal-weight subset) | | | **0.7089** | — |
+
+- The pooled figure is above the full-validation 0.6572 because this subset weights the sources
+  equally, and the full split is SEC-heavy.
+- **CaseHOLD:** test split downloaded (3,600 items, labels balanced 713–727 per class) and cached at
+  `.smoke/casehold_test.jsonl`. The first download hit HTTP 429, so the fetch now paces requests and
+  honours `Retry-After`. The score is recorded below when the run finishes.
+- These are sanity numbers. The **official** before/after pair is measured in the GPU container
+  (§5, step 7.1).
+
+### 7.2 Code written and tested locally (not yet run on Modal)
+- **New files:** `raft_data.py` (pure helpers) and `raft_app.py` (Modal: a remote driver, pass 1
+  over 20 corpus shards, candidate selection, a leakage scan over 20 shards, 6 BM25 indexes).
+- **`smoke_raft.py` passes 25/25 on 99 real documents.** Three problems were found and fixed:
+  - The passage OCR tag misfired on SEC: 53% of SEC passages were tagged OCR because the macOS word
+    list lacks plurals ("products", "engines", even "has"). Like Phase 1, the OCR check now applies
+    only to case law. SEC clean share went from 40% to 93%.
+  - The per-document cap in candidate selection was per stratum; it is now global.
+  - BM25 probe misses were SEC filings repeating a sentence in sibling passages, so a hit now counts
+    when the top-1 passage contains the query sentence verbatim. Locally 96.7% (bar 95%).
+- **Chunk lengths:** encoding a passage standalone differs from the offset-based count by −1…+4
+  tokens (6,345 passages; max 163). The 1,024 limit is enforced per formatted example.
+- **Leakage scan:** passages copied from train documents score 1.00; novel text scores 0.00.
+- **Throughput:** 3.4M n-grams/s locally, so the whole-corpus scan is ≈ 12 CPU-minutes.

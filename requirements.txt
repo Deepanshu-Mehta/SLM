@@ -22,6 +22,9 @@ matplotlib==3.9.2
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 
+# Phase 7 local tests (smoke_raft.py): BM25 retrieval
+bm25s==0.3.13
+
 # Optional: reproduce Phase 2's LSH band/row choice; static checks
 datasketch==1.6.5
 pyflakes

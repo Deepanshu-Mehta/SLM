@@ -255,6 +255,9 @@ class TeacherConfig:
     checker_batch_out: float = 1.875
     # thinking: DeepSeek effort when a check thinks (refusal labels, dev/test); Gemini level
     check_thinking_effort: str = "low"
+    # trial 7.3 rule (pre-registered): thinking-off agreement with Gemini on refusal labels was
+    # within 2 points of thinking-on (89.5% vs 90.6%), so DeepSeek checks run without thinking
+    think_on_refusal_checks: bool = False
     checker_thinking: str = "low"
     # per-request output caps (bound the worst case, §5.5)
     max_tokens_generate: int = 600

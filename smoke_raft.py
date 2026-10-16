@@ -261,10 +261,17 @@ def teacher_output_checks(tok) -> None:
                          passage, "yes_no_check")
     check("G3: yes/no keeps 'No.' and re-cuts its quote",
           yn[0] == "" and yn[1]["yes_no"] == "No" and yn[1]["quote"].startswith("net revenues"), str(yn))
-    check("answers_agree: same number / paraphrase / different",
-          R.answers_agree("$4.2 million", "It reported $4.2 million.")
-          and R.answers_agree("the claim was timely", "The claim was timely filed")
-          and not R.answers_agree("$4.2 million", "$3.1 million"))
+    check("answers_agree: symmetric containment, numbers, different facts",
+          R.answers_agree("It reported $4.2 million.", "$4.2 million")
+          and R.answers_agree("The claim was timely filed", "the claim was timely")
+          and R.answers_agree("Twenty-two additional charges were nol prossed on February 23, 1970.",
+                              "twenty-two")
+          and R.answers_agree('Disselkamp claimed Bischoff and Shilling used Patton as a "rubber stamp."',
+                              "Bischoff and Shilling")
+          and R.answers_agree("the Requisite Lenders' instruction",
+                              "at any time that the Requisite Lenders have instructed Agent to act")
+          and not R.answers_agree("$3.1 million", "$4.2 million")
+          and not R.answers_agree("The claim was dismissed as untimely.", "timely filed claim"))
 
     # student format: decision token first, labels mask the prompt, segment == whole string
     prompt = R.format_prompt(["Alpha beta gamma.", "Delta epsilon."], question="What is alpha?")

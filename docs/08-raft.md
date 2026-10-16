@@ -797,3 +797,67 @@ replaced by 500 items on CPU (26 min).
 - **Guards tested:** the peak-hour guard (Fri 02:30 and 07:30 UTC peak; 05:30, 12:30 and Sat
   off-peak). The ledger refuses an over-cap reservation and persists across runs.
 
+### 7.3 Teacher trial: DONE (2026-10-16, **$0.553** of the $3 cap)
+**Inputs.** 150 train source passages (case law 60 / SEC 60 / web 30; 100 G1, 25 G2, 25 G3). Both
+models wrote from every passage, and every candidate was checked three ways. Spend was $0.549 on
+APIs plus $0.004 on Modal; 0 containers left afterwards.
+
+| Step | Result |
+|---|---|
+| DeepSeek generation | 150/150 OK in 13 s, $0.020. **0 reasoning tokens** on every no-think call |
+| Gemini generation (batch) | 150/150 OK, 166 s turnaround, $0.063 |
+| Mechanical checks | DeepSeek keeps 179 of 239 items (75%), Gemini 213 of 245 (87%). Top drop for both: questions copying ≥ 6 passage words (DeepSeek 43, Gemini 23). Also 4 DeepSeek summaries lacked "the passage" |
+| Assembly | 541 of 545 (4: too few valid distractors). Median 640 tokens (max 795). Oracle position 84/89/96/81. Same-document distractors 1–2 in every context. **Entity present in 74% of B1** (target ≥ 50%) |
+| Checks | DeepSeek off 525/525 ($0.074), DeepSeek on 496/496 ($0.185, including 15 runaway-thinking retries), Gemini 525/525 ($0.207). **JSON parse rate 100% for all three** |
+
+**Decision rules.**
+
+| Rule | First scoring | After the agreement fix | Outcome |
+|---|---|---|---|
+| Writer (DeepSeek stays unless Gemini is ≥ 10 points better) | 52.7% vs 66.9% ❌ | **64.0% vs 71.4%** | **keep DeepSeek** |
+| Thinking on refusal labels (off if within 2 points) | 90.6% vs 89.5% | 90.6% vs 89.5% | **thinking OFF everywhere** |
+| JSON with thinking ≥ 98% | 100% | 100% | ✅ |
+| Checker agreement ≥ 85% | 82.4% ❌ | **90.0%** | ✅ |
+
+**The fix applied after the first scoring, and why it is legitimate.** The first scoring failed two
+rules because of a bug in `answers_agree`, not in the labels.
+- In 55 of the 60 answerable items that DeepSeek accepted and Gemini rejected, **Gemini chose the
+  same passage and the same verbatim quote**, and answered in a full sentence where the writer gave a
+  few words. Token-F1 penalised that verbosity.
+- The rule is now **symmetric containment** with light suffix stripping: the shorter answer must be
+  inside the longer one. It applies only after the passage and quote already match.
+- It has its own tests, including a different-fact negative. The decision rules themselves were not
+  changed.
+- The remaining 5 were genuine Gemini misses: "unanswerable" where the passage states the answer.
+
+**Thinking, looked at directly.**
+- On the 16 refusal items where thinking-on rejects and thinking-off accepts, Gemini sides with
+  thinking-off 10 times.
+- Thinking mostly adds "ambiguous" flags; it does not find answers hidden in distractors. Thinking
+  stays off.
+
+**Keep rates.**
+
+| Bucket | Train rule (DeepSeek, no thinking) | Dev/test rule (DeepSeek and Gemini) |
+|---|---|---|
+| A | 263/305 (86%) | 246/305 (81%) |
+| B1 | 129/150 (86%) | 124/150 (83%) |
+| B2 | 38/41 (93%) | 37/41 (90%) |
+| C | 45/45 | 45/45 |
+
+**Measured unit costs** (per call) against the plan's model:
+- DeepSeek generation $0.00013 and DeepSeek check $0.00014; the plan assumed ~$0.0007 and
+  ~$0.0005, because outputs are 62–200 tokens rather than 600.
+- Gemini batch check $0.00040; the plan assumed ~$0.0010.
+- DeepSeek's prompt cache barely hit (~3% of prompt tokens). Costs came in under the model anyway.
+
+**Re-quote.**
+- 7.4 pilot ≈ **$1.90** (estimate was $7.50). Train data ≈ **$0.25 per 1,000 kept examples**.
+- 7.8 scale ≈ **$2.51**.
+- Phase 7 total ≈ **$7** (estimate was $20).
+
+**Prompt fixes proposed for 7.4** (their effect is measured in the 7.4 funnel):
+1. G1 rule 3: paraphrase more strictly.
+2. G3: the instruction must literally say "the passage".
+3. V1: "answer as briefly as possible: a few words, not a sentence".
+

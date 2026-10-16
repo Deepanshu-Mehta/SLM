@@ -269,6 +269,25 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   - If PMI is also at chance, CaseHOLD can't detect forgetting, and held-out bits/byte stays the
     guard (the user decides).
 
+### E-22 · Step 7.3 teacher trial (2026-10-16, $0.553)
+150 train passages, both writers, three checkers (`docs/08-raft.md` §13).
+
+| Rule | Result | Outcome |
+|---|---|---|
+| Writer keep rate | DeepSeek **64.0%** vs Gemini **71.4%** | keep DeepSeek |
+| Thinking on refusal labels (agreement with Gemini) | off 89.5% vs on 90.6% | thinking off |
+| JSON parse | 100% | ✅ |
+| Checker agreement | **90.0%** | ✅ |
+
+- **These outcomes come after fixing `answers_agree`.** Token-F1 counted a verbose but correct
+  checker answer (same passage, same quote) as disagreement. It is now symmetric containment with
+  light stemming. Before the fix, the writer and checker rules failed (C-11).
+- **Keep rates.** Train rule: A 86%, B1 86%, B2 93%, C 100%. Dev/test rule: 81% / 83% / 90% / 100%.
+- **Units.** Per call: DeepSeek $0.00013 for generation and $0.00014 for a check; Gemini batch
+  $0.00040 for a check. That is ~4× under the plan's model. DeepSeek's prefix cache barely hit (~3%).
+- **Main generation loss:** questions copying ≥ 6 passage words (DeepSeek 23% of items, Gemini 12%).
+- **Re-quote:** 7.4 ≈ $1.90; 7.8 ≈ $2.51; Phase 7 ≈ $7 (was $20).
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -291,6 +310,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-16 | 10-16 | Phase 7 setup (user's choice): **`deepseek-flash` writes and checks, off-peak; `gemini-3.8-flash` is the independent checker; 10K training examples; pre-filter source passages; thinking only on refusal-label checks**; ≈ $20 | E-18: about 4× cheaper than Gemini + Sonnet at 20K. DeepSeek's terms allow training on outputs. Quality is protected by two-family agreement on dev/test labels, the 5% audit, and incremental top-up if targets are missed |
 | D-17 | 10-16 | Phase 7 review fixes (user-approved patch): SFT and replay losses normalised separately (λ = 0.25, per-token within SFT); rows 4–6 sampled from N(μ, Σ); dev/test leakage scanned against the whole pretraining corpus; paired A/B1 with same-document distractors; C-bucket placeholder and V2 check; DeepSeek thinking explicitly off, with `max_tokens` caps; per-bucket audit fallback (≤ $3); pilot compiled once | E-19. Net cost ≈ $0; estimate stays ≈ $20 |
 | D-18 | 10-16 | Keep the 10% leak rule; build the dev/test pool only from leak-scanned passages (SEC per-document cap 3, numeric quota filled first); record the SEC BM25 top-1 check as failed-and-explained (top-10 recall 99.6%) | E-20: relaxing the rule would let near-copies of training filings into the test; enough clean SEC passages exist |
+| D-19 | 10-16 | After the 7.3 trial: DeepSeek stays the writer; DeepSeek checks run **without thinking** (`TEACHER.think_on_refusal_checks = False`); answer agreement is symmetric containment | Pre-registered rules (E-22). Thinking's extra rejections were mostly "ambiguous" flags, and Gemini sided with thinking-off on 10 of 16 |
 
 ## Corrections log
 
@@ -306,3 +326,4 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | C-08 | HF model card linked `Deepanshu027/slm-125m-api` | Links the live website and Modal API | That Space was never created (E-14) |
 | C-09 | Stream events counted as tokens | The true count comes in the `done` event | E-14 |
 | C-10 | SEC held-out 0.463 bits/byte read as generalisation | Optimistic: 61% of SEC val passages share ≥ 50% of their 13-grams with training filings | E-20 |
+| C-11 | Trial 7.3 first scoring: Gemini ≥ 10 points better as writer; checker agreement 82.4% | DeepSeek 64.0% vs Gemini 71.4% (keep DeepSeek); agreement 90.0% | `answers_agree` used token-F1. 55 of 60 "disagreements" had the same passage and quote with a verbose answer (E-22) |

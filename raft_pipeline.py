@@ -269,8 +269,9 @@ def cmd_report(args) -> None:
         v = verdicts[checker].get(row["cid"])
         return accept(row, v["json"] if v and v["ok"] else None)
 
-    def production(row):          # train rule: DeepSeek; thinking only for refusal labels
-        return acc(row, "ds_on" if row["bucket"] in ("B1", "B2") else "ds_off")
+    def production(row):          # train rule: DeepSeek; thinking only if config enables it
+        think = T.think_on_refusal_checks and row["bucket"] in ("B1", "B2")
+        return acc(row, "ds_on" if think else "ds_off")
 
     def agree(a, b, subset):
         pairs = [(acc(r, a), acc(r, b)) for r in subset]

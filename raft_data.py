@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import re
 from bisect import bisect_left
-from collections import Counter
 from typing import Iterable
 
 import config
@@ -344,21 +343,41 @@ def check_g3_item(item: dict, passage: str, task: str) -> tuple[str, dict]:
     return "", out
 
 
-def answers_agree(a: str, b: str) -> bool:
-    """Numbers/names identical, or token-F1 >= 0.5 (checker vs writer answer)."""
+_SUFFIXES = ("ations", "ation", "ions", "ion", "ings", "ing", "edly", "ed", "es", "s", "ly")
+
+
+def _stem(w: str) -> str:
+    """Light suffix stripping so 'instruction' ~ 'instructed'; 'untimely' stays 'untime'."""
+    for suf in _SUFFIXES:
+        if w.endswith(suf) and len(w) - len(suf) >= 4:
+            return w[: -len(suf)]
+    return w
+
+
+def answers_agree(checker: str, reference: str) -> bool:
+    """Is the shorter of the two answers contained in the longer one?
+
+    Checkers and writers differ in verbosity in both directions (a full sentence vs a few
+    words), so this is symmetric containment, not token-F1 (trial 7.3: F1 rejected 55
+    correct answers; one-way containment then rejected verbose writer answers). It is only
+    applied after the checker chose the same passage and an overlapping verbatim quote.
+    Agree when the smaller set of numbers is a subset of the other's, or when >= 80% of the
+    shorter answer's content words appear in the longer one.
+    """
     def digits(s: str) -> set[str]:
-        return {canon(t).strip(".,;:()") for t in s.split() if any(c.isdigit() for c in t)}
-    da, db = digits(a), digits(b)
-    if da and da == db:
-        return True
-    wa, wb = _content(word_list(a)), _content(word_list(b))
-    if not wa or not wb:
-        return canon(a).lower() == canon(b).lower()
-    common = sum((Counter(wa) & Counter(wb)).values())
-    if common == 0:
-        return False
-    p, r = common / len(wb), common / len(wa)
-    return 2 * p * r / (p + r) >= 0.5
+        return {canon(t).strip(".,;:()$%") for t in s.split() if any(c.isdigit() for c in t)}
+    da, db = digits(checker), digits(reference)
+    if da and db:
+        small, large = sorted((da, db), key=len)
+        if small <= large:
+            return True
+    a = [_stem(w) for w in _content(word_list(checker))]
+    b = [_stem(w) for w in _content(word_list(reference))]
+    short, long_ = sorted((a, b), key=len)
+    if not short:
+        x, y = sorted((canon(checker).lower().strip(" ."), canon(reference).lower().strip(" .")), key=len)
+        return bool(x) and x in y
+    return sum(w in set(long_) for w in short) / len(short) >= 0.8
 
 
 def spans_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:

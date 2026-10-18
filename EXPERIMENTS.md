@@ -396,6 +396,15 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Reproducibility:** the λ 0.25 arm's epoch 7 (+0.0315) matches 7.6's guard value (+0.0314). The
   best-epoch pick moved (4 vs 5) because dev macro-F1 differs by < 0.03 between epochs.
 
+### E-29 · Step 7.6c confirmation run (2026-10-18, $0.52)
+- LR 5e-5, λ 1.0, n 2,000, 8 epochs, judged on the final epoch:
+  - bits/byte **+0.0051** ✅ (peak +0.0075);
+  - CaseHOLD PMI **−4.7 points** ❌;
+  - copy score −0.104, grounded 0.193, hallucination 0.136.
+- **CaseHOLD drops at once and doesn't track bits/byte:** −3.4 at step 39 (bits/byte +0.007), then
+  −2.3 to −5.0 across epochs. 7.6b's −1.1 at λ 1.0 / LR 2e-4 looks like the favourable end of that
+  scatter. No tested setting meets the CaseHOLD guard; LR 5e-5 meets the bits/byte guard.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

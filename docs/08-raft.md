@@ -1277,3 +1277,35 @@ Copy-constrained grounded accuracy is 0.21–0.25 in every arm, versus 0.05–0.
   `--max-usd 1.4`. The entrypoint refuses anything above the $1.45 left of the 7.6 cap.
 - **Resume.** The result is appended to `/data/raft/runs/pilot_confirm/results.jsonl`, so a restart
   skips it. Detached; verify 0 containers afterwards.
+
+### 7.6c Confirmation run: DONE, FAIL on CaseHOLD (2026-10-18, $0.52; 7.6 total $3.07 of the $4 cap)
+356 s; 0 containers afterwards. Staging took 5 s (warm Volume).
+
+LR 5e-5, λ 1.0, per epoch:
+
+| Epoch (step) | 1 (39) | 2 (78) | 3 (117) | 4 (156) | 5 (195) | 6 (234) | 7 (273) | **8 (312, judged)** |
+|---|---|---|---|---|---|---|---|---|
+| Bits/byte change | +.0073 | +.0073 | +.0075 | +.0072 | +.0063 | +.0058 | +.0055 | **+.0051** ✅ |
+| CaseHOLD PMI (points) | −3.4 | −2.3 | −4.1 | −5.0 | −4.1 | −4.8 | −4.9 | **−4.7** ❌ |
+| Dev macro-F1 | 0.575 | 0.486 | 0.762 | 0.827 | 0.860 | 0.852 | 0.830 | 0.841 |
+
+Final epoch, plain vs copy-constrained decoding:
+- score −0.553 → −0.104;
+- grounded 0.044 → 0.193;
+- hallucination 0.437 → 0.136;
+- over-refusal 0.160 and refusal recall 0.847 under both.
+
+**Verdict by the pre-registered rule: FAIL** (bits/byte passes; CaseHOLD −4.7 < −2).
+
+**Findings.**
+1. **The CaseHOLD drop appears in the first epoch and doesn't track bits/byte.** At step 39 it is already
+   −3.4 points while bits/byte is +0.007. Across epochs it moves between −2.3 and −5.0.
+2. **7.6b's λ 1.0 result was probably luck.** That arm's −1.1 at one epoch is most likely the favourable
+   end of epoch-to-epoch scatter, not a real λ effect: at LR 5e-5 / λ 1.0 every epoch is −2.3 or worse.
+   No tested setting meets the CaseHOLD guard.
+3. **LR 5e-5 holds bits/byte at every epoch** (peak +0.0075). The bits/byte guard is solved.
+4. **Task quality at LR 5e-5:**
+   - final-epoch copy score −0.104;
+   - for comparison, LR 2e-4 / λ 1.0 at its best epoch scored −0.029 (a different epoch, so only roughly
+     comparable);
+   - macro-F1 at the end is 0.84, in the same range as the other arms.

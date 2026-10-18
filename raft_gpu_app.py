@@ -1,7 +1,8 @@
 """Phase 7 GPU steps on Modal (docs/08-raft.md §5, §7). Nothing here runs without --confirm.
 
     modal run --detach raft_gpu_app.py::sweep --confirm [--max-usd 4]      # step 7.6, 1 x H100
-    modal run --detach raft_gpu_app.py::lambda_check --confirm --max-usd 1.5   # step 7.6b, 1 x H100
+    modal run --detach raft_gpu_app.py::lambda_check --confirm --max-usd 1.6   # step 7.6b, 1 x H100
+    modal run --detach raft_gpu_app.py::confirm_check --confirm --max-usd 1.4  # step 7.6c, 1 x H100
 
 One container does the whole pilot sweep:
   1. stage the train token shards on local disk (replay windows are random 2 KB reads);
@@ -40,7 +41,7 @@ RUN_DIR = Path(config.RAFT_DIR) / "runs" / "pilot"
 DATA_DIR = Path(config.RAFT_DIR) / "datasets" / "pilot"
 CASEHOLD = Path(config.RAFT_DIR) / "eval" / "casehold_test.jsonl"
 LOCAL_TRAIN = "/tmp/tokens/train"
-SPENT_76_USD = 1.37        # measured 7.6 spend incl. the two failed launches (docs/08-raft.md §13)
+SPENT_76_USD = 2.55        # measured: 7.6 $1.37 (incl. two failed launches) + 7.6b $1.18 (docs/08-raft.md §13)
 
 
 def _rate_per_s() -> float:
@@ -149,11 +150,15 @@ def pilot_sweep(max_usd: float, compile: bool = True) -> dict:
 
 @app.function(image=gpu_image, gpu=f"{config.SFT.gpu}:{config.SFT.gpu_count}", volumes=VOLUMES,
               timeout=60 * 45, cpu=8.0, memory=32_768)
-def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int, compile: bool = True) -> dict:
+def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int, compile: bool = True,
+                 per_epoch_casehold: bool = False, judge: str = "best", out_name: str = "pilot_lambda") -> dict:
     """Step 7.6b: the forgetting fix. The pilot's selected setting at several (LR, replay weight)
     arms, with held-out bits/byte after EVERY epoch (the forgetting slope, to project to 7.8's
     longer run), CaseHOLD PMI at the best epoch, and dev proxies with plain and copy-constrained
-    decoding. Results are appended per arm, so a restarted container skips finished arms."""
+    decoding. Results are appended per arm, so a restarted container skips finished arms.
+    Step 7.6c reuses it with CaseHOLD PMI every epoch too, judged on the FINAL epoch's weights
+    (`judge="final"`): 7.6b showed forgetting is transient and best-epoch picks are noisy."""
+    assert judge in ("best", "final")
     import torch
     from transformers import AutoTokenizer
 
@@ -165,7 +170,7 @@ def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int,
 
     t0 = time.time()
     spent = lambda: (time.time() - t0 + 60.0) * _rate_per_s()
-    out_dir = Path(config.RAFT_DIR) / "runs" / "pilot_lambda"
+    out_dir = Path(config.RAFT_DIR) / "runs" / out_name
     out_dir.mkdir(parents=True, exist_ok=True)
     log = lambda m: print(f"[{time.time() - t0:7.0f}s ${spent():.2f}] {m}", flush=True)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -188,7 +193,7 @@ def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int,
     net = torch.compile(raw) if compile else raw
     res_path = out_dir / "results.jsonl"
     done = {json.loads(ln)["key"] for ln in res_path.read_text().splitlines() if ln.strip()} if res_path.exists() else set()
-    run_cost = 240 * _rate_per_s()
+    run_cost = (480 if per_epoch_casehold else 240) * _rate_per_s()   # 8 CaseHOLD passes add ~280 s
     rows = []
     for arm in arms:
         lr, lam = arm["lr"], arm["lambda"]
@@ -204,10 +209,18 @@ def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int,
         train = sft.tokenize(sft.select_mix(pool, n, refusal_share, config.SFT.seed), tok, config.SEQ_LEN)
         cfg = sft.RunConfig(lr=lr, epochs=config.SFT.pilot_max_epochs, replay_weight=lam, gpu=config.SFT.gpu,
                             max_usd=max_usd, log_every=10_000)
-        bpb = lambda: {"heldout_pooled_bpb": EF.heldout_bpb(raw, tok, val_dir, subset, device, ac, batch=16)["pooled_bpb"]}
-        res = sft.train_one(cfg, raw, net, train, dev, store, dec, device, None, log=lambda *_: None, extra_eval=bpb)
-        raw.load_state_dict(res["best_state"])
-        ch = EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16)
+        def extra() -> dict:
+            r = {"heldout_pooled_bpb": EF.heldout_bpb(raw, tok, val_dir, subset, device, ac, batch=16)["pooled_bpb"]}
+            if per_epoch_casehold:
+                r["casehold_pmi"] = EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16)["acc_pmi"]
+            return r
+
+        res = sft.train_one(cfg, raw, net, train, dev, store, dec, device, None, log=lambda *_: None, extra_eval=extra)
+        if judge == "best":
+            raw.load_state_dict(res["best_state"])
+        ref = res["best"] if judge == "best" else res["history"][-1]      # raw holds the final weights otherwise
+        ch = ({"acc_pmi": ref["casehold_pmi"]} if per_epoch_casehold
+              else EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16))
         prompts, ks = [r["prompt"] for r in dev.rows], [len(r["passages"] or []) for r in dev.rows]
         plain = E.proxy_metrics(dev.rows, E.generate_batch(raw, tok, prompts, ks, device, tau=0.5, batch=64, autocast=ac))
         copy = E.proxy_metrics(dev.rows, E.generate_batch(raw, tok, prompts, ks, device, tau=0.5, batch=64, autocast=ac,
@@ -217,15 +230,19 @@ def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int,
                "best_step": best["step"], "steps_per_epoch": res["plan"]["steps_per_epoch"],
                "best_dev_macro_f1": best["dev_macro_f1"], "best_dev_auroc": best["dev_auroc"],
                "bpb_delta_at_best": best["heldout_pooled_bpb"] - base["heldout"]["pooled_bpb"],
+               "judge": judge, "judged_step": ref["step"], "judged_dev_macro_f1": ref["dev_macro_f1"],
+               "bpb_delta_judged": ref["heldout_pooled_bpb"] - base["heldout"]["pooled_bpb"],
                "casehold_pmi": ch["acc_pmi"], "casehold_pmi_delta_points": 100 * (ch["acc_pmi"] - base["casehold"]["acc_pmi"]),
                "history": [{"step": h["step"], "macro_f1": h["dev_macro_f1"],
-                            "bpb_delta": h["heldout_pooled_bpb"] - base["heldout"]["pooled_bpb"]} for h in res["history"]],
+                            "bpb_delta": h["heldout_pooled_bpb"] - base["heldout"]["pooled_bpb"],
+                            **({"casehold_pmi_delta_points": 100 * (h["casehold_pmi"] - base["casehold"]["acc_pmi"])}
+                               if "casehold_pmi" in h else {})} for h in res["history"]],
                "plain": plain, "copy": copy, "seconds": round(time.time() - t1, 1)}
         with res_path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
         volume.commit()
         rows.append(row)
-        log(f"{key}: best step {best['step']} macroF1 {best['dev_macro_f1']:.3f} | bpb delta {row['bpb_delta_at_best']:+.4f} "
+        log(f"{key}: {judge} step {ref['step']} macroF1 {ref['dev_macro_f1']:.3f} | bpb delta {row['bpb_delta_judged']:+.4f} "
             f"| casehold PMI {ch['acc_pmi']:.3f} ({row['casehold_pmi_delta_points']:+.1f}) | score plain {plain['selection_score']:+.3f} "
             f"copy {copy['selection_score']:+.3f} ({row['seconds']}s)")
     all_rows = [json.loads(ln) for ln in res_path.read_text().splitlines() if ln.strip()]
@@ -249,6 +266,30 @@ def lambda_check(confirm: bool = False, max_usd: float = 1.5):
     for r in rep["results"]:
         print(f"{r['key']}: bpb delta {r['bpb_delta_at_best']:+.4f} casehold {r['casehold_pmi_delta_points']:+.1f} "
               f"score plain {r['plain']['selection_score']:+.3f} copy {r['copy']['selection_score']:+.3f}")
+    print(f"spent ${rep['spent_usd']:.2f} -> {out}")
+
+
+@app.local_entrypoint()
+def confirm_check(confirm: bool = False, max_usd: float = 1.4):
+    """Step 7.6c (paid: 1 x H100): the recommended remedy, LR 5e-5 / lambda 1.0, with held-out bits/byte
+    and CaseHOLD PMI every epoch, judged on the final epoch. Requires --confirm; draws on the 7.6 cap."""
+    if not confirm:
+        raise SystemExit("Step 7.6c uses a GPU and costs money. Re-run with --confirm once approved.")
+    left = config.RAFT_STAGE_CAPS_USD["7.6-pilot-gpu"] - SPENT_76_USD
+    if max_usd > left:
+        raise SystemExit(f"--max-usd {max_usd} exceeds what is left of the 7.6 cap (${left:.2f})")
+    best = json.loads(Path(".smoke/raft/pilot/sweep_report.json").read_text())["best"]
+    lr, lam = config.SFT.confirm_arm
+    print(f"7.6c at n {best['n']}, refusal share {best['refusal_share']}: lr {lr:g}, lambda {lam:g}, judged on the final epoch")
+    rep = lambda_sweep.remote(max_usd, [{"lr": lr, "lambda": lam}], best["refusal_share"], best["n"],
+                              per_epoch_casehold=True, judge="final", out_name="pilot_confirm")
+    out = Path(".smoke/raft/pilot/confirm_report.json")
+    out.write_text(json.dumps(rep, indent=2, default=str))
+    for r in rep["results"]:
+        ok = r["bpb_delta_judged"] <= config.RAFT.max_bpb_increase and r["casehold_pmi_delta_points"] >= -2.0
+        print(f"{r['key']} final step {r['judged_step']}: bpb delta {r['bpb_delta_judged']:+.4f} "
+              f"casehold {r['casehold_pmi_delta_points']:+.1f} copy score {r['copy']['selection_score']:+.3f} "
+              f"-> {'PASS' if ok else 'FAIL'}")
     print(f"spent ${rep['spent_usd']:.2f} -> {out}")
 
 

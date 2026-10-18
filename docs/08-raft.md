@@ -1263,3 +1263,17 @@ Copy-constrained grounded accuracy is 0.21–0.25 in every arm, versus 0.05–0.
    7.6 didn't record the retrain's best epoch. Choosing the best epoch by dev macro-F1 is itself noisy
    (arms differ by ≤ 0.03), so it moves between otherwise identical runs.
 5. **No arm passes both guards on measured end-of-run numbers.** By the rule's own fallback: stop and ask.
+
+### 7.6c Confirmation run: PLANNED, approved by the user (written 2026-10-18, before the run)
+- **What.** One arm, `config.SFT.confirm_arm`: LR 5e-5, λ 1.0, at the 7.6 selection (n 2,000, refusal
+  35%, 8 epochs = 312 steps). Held-out bits/byte **and** CaseHOLD PMI after every epoch. Proxies
+  (plain and copy-constrained) are measured on the **final** epoch's weights.
+- **Rule** (end-of-run numbers, per E-28 and C-12): PASS if the final-epoch bits/byte change is ≤ +0.02
+  **and** the final-epoch CaseHOLD PMI change is ≥ −2 points.
+  - If it passes, 7.8 uses LR 5e-5 / λ 1.0 and keeps the final epoch.
+  - If it fails, stop and bring the options to the user: accept a documented CaseHOLD miss, fewer
+    7.8 epochs, or a lower replay ratio.
+- **Cost.** ≈ 650 s (staging up to 205 s, training 160 s, 8 CaseHOLD passes ≈ 280 s) ≈ **$0.90**,
+  `--max-usd 1.4`. The entrypoint refuses anything above the $1.45 left of the 7.6 cap.
+- **Resume.** The result is appended to `/data/raft/runs/pilot_confirm/results.jsonl`, so a restart
+  skips it. Detached; verify 0 containers afterwards.

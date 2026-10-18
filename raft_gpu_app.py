@@ -3,6 +3,7 @@
     modal run --detach raft_gpu_app.py::sweep --confirm [--max-usd 4]      # step 7.6, 1 x H100
     modal run --detach raft_gpu_app.py::lambda_check --confirm --max-usd 1.6   # step 7.6b, 1 x H100
     modal run --detach raft_gpu_app.py::confirm_check --confirm --max-usd 1.4  # step 7.6c, 1 x H100
+    modal run --detach raft_gpu_app.py::casehold_check --confirm --max-usd 0.3 # step 7.6d, 1 x L40S
 
 One container does the whole pilot sweep:
   1. stage the train token shards on local disk (replay windows are random 2 KB reads);
@@ -41,7 +42,7 @@ RUN_DIR = Path(config.RAFT_DIR) / "runs" / "pilot"
 DATA_DIR = Path(config.RAFT_DIR) / "datasets" / "pilot"
 CASEHOLD = Path(config.RAFT_DIR) / "eval" / "casehold_test.jsonl"
 LOCAL_TRAIN = "/tmp/tokens/train"
-SPENT_76_USD = 2.55        # measured: 7.6 $1.37 (incl. two failed launches) + 7.6b $1.18 (docs/08-raft.md §13)
+SPENT_76_USD = 3.07        # measured: 7.6 $1.37 (incl. two failed launches) + 7.6b $1.18 + 7.6c $0.52 (§13)
 
 
 def _rate_per_s() -> float:
@@ -247,6 +248,93 @@ def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int,
             f"copy {copy['selection_score']:+.3f} ({row['seconds']}s)")
     all_rows = [json.loads(ln) for ln in res_path.read_text().splitlines() if ln.strip()]
     return {"results": all_rows, "spent_usd": spent(), "wall_seconds": time.time() - t0}
+
+
+def casehold_decompose(base: list[dict], tuned: list[dict]) -> dict:
+    """Split a CaseHOLD PMI change into its two terms. PMI picks argmax(cond - null) over the 5 holdings;
+    swapping in one model's term at a time shows whether the change comes from the citing-context
+    term (cond) or the context-free prior term (null). Margins: correct holding minus the mean of the
+    other four; a falling cond margin or a rising null margin both hurt PMI."""
+    import numpy as np
+
+    def acc(cond_from, null_from):
+        return float(np.mean([int(np.argmax(np.array(c["cond"]) - np.array(u["null"]))) == c["label"]
+                              for c, u in zip(cond_from, null_from)]))
+
+    def margin(rows, term):
+        m = []
+        for r in rows:
+            v = np.array(r[term])
+            m.append(v[r["label"]] - np.delete(v, r["label"]).mean())
+        return np.array(m)
+
+    pb = [int(np.argmax(np.array(r["cond"]) - np.array(r["null"]))) == r["label"] for r in base]
+    pt = [int(np.argmax(np.array(r["cond"]) - np.array(r["null"]))) == r["label"] for r in tuned]
+    d_cond, d_null = margin(tuned, "cond") - margin(base, "cond"), margin(tuned, "null") - margin(base, "null")
+    se = lambda d: float(d.std(ddof=1) / np.sqrt(len(d)))
+    return {"n": len(base),
+            "pmi_acc": {"base": acc(base, base), "tuned": acc(tuned, tuned),
+                        "tuned_cond_base_null": acc(tuned, base), "base_cond_tuned_null": acc(base, tuned)},
+            "plain_acc": {"base": float(np.mean([int(np.argmax(r["cond"])) == r["label"] for r in base])),
+                          "tuned": float(np.mean([int(np.argmax(r["cond"])) == r["label"] for r in tuned]))},
+            "flips": {"right_to_wrong": int(sum(a and not b for a, b in zip(pb, pt))),
+                      "wrong_to_right": int(sum(b and not a for a, b in zip(pb, pt)))},
+            "margin_change_nats": {"cond": float(d_cond.mean()), "cond_se": se(d_cond),
+                                   "null": float(d_null.mean()), "null_se": se(d_null),
+                                   "pmi": float((d_cond - d_null).mean()), "pmi_se": se(d_cond - d_null)}}
+
+
+DIAG_GPU = "L40S"
+
+
+@app.function(image=gpu_image, gpu=DIAG_GPU, volumes=VOLUMES, timeout=60 * 20, cpu=4.0, memory=16_384)
+def casehold_diag(max_usd: float) -> dict:
+    """Step 7.6d: CaseHOLD PMI decomposition, base weights vs the 7.6 best pilot weights (best_pilot.pt)."""
+    import torch
+    from transformers import AutoTokenizer
+
+    import eval_forgetting as EF
+    import sft
+    from train import autocast
+
+    t0 = time.time()
+    rate = config.GPU_RATE_PER_SEC[DIAG_GPU] * config.COST_OVERHEAD_FACTOR
+    spent = lambda: (time.time() - t0 + 60.0) * rate
+    device = torch.device("cuda")
+    ac = lambda: autocast(device)
+    tok = AutoTokenizer.from_pretrained(config.TOKENIZER_DIR)
+    items = [json.loads(ln) for ln in CASEHOLD.read_text().splitlines() if ln.strip()]
+    raw = sft.load_init(config.RAFT_INIT_CKPT).to(device)
+    base = EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16, return_scores=True)
+    print(f"[{time.time() - t0:.0f}s ${spent():.3f}] base PMI {base['acc_pmi']:.3f}", flush=True)
+    if spent() * 2 > max_usd:
+        raise SystemExit(f"budget: the second pass would cross --max-usd {max_usd}")
+    raw.load_state_dict(torch.load(RUN_DIR / "best_pilot.pt", map_location=device))
+    tuned = EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16, return_scores=True)
+    print(f"[{time.time() - t0:.0f}s ${spent():.3f}] tuned PMI {tuned['acc_pmi']:.3f}", flush=True)
+    rep = {"decomposition": casehold_decompose(base["scores"], tuned["scores"]),
+           "base": {k: v for k, v in base.items() if k != "scores"},
+           "tuned": {k: v for k, v in tuned.items() if k != "scores"},
+           "gpu": DIAG_GPU, "spent_usd": spent(), "wall_seconds": time.time() - t0}
+    out = Path(config.RAFT_DIR) / "runs" / "pilot" / "casehold_diag.json"
+    out.write_text(json.dumps(rep, indent=2))
+    volume.commit()
+    return rep
+
+
+@app.local_entrypoint()
+def casehold_check(confirm: bool = False, max_usd: float = 0.3):
+    """Step 7.6d (paid: 1 x L40S). Requires --confirm; draws on the 7.6 cap."""
+    if not confirm:
+        raise SystemExit("Step 7.6d uses a GPU and costs money. Re-run with --confirm once approved.")
+    left = config.RAFT_STAGE_CAPS_USD["7.6-pilot-gpu"] - SPENT_76_USD
+    if max_usd > left:
+        raise SystemExit(f"--max-usd {max_usd} exceeds what is left of the 7.6 cap (${left:.2f})")
+    rep = casehold_diag.remote(max_usd)
+    out = Path(".smoke/raft/pilot/casehold_diag.json")
+    out.write_text(json.dumps(rep, indent=2))
+    print(json.dumps(rep["decomposition"], indent=1))
+    print(f"spent ${rep['spent_usd']:.3f} -> {out}")
 
 
 @app.local_entrypoint()

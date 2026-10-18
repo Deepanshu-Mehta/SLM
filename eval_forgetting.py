@@ -109,11 +109,13 @@ def _continuation_ids(tok, prefix: str, ending: str, max_len: int) -> tuple[list
 
 @torch.no_grad()
 def score_casehold(net, tok, items: list[dict], device: torch.device,
-                   autocast: Autocast = no_autocast, items_per_batch: int = 4) -> dict:
-    """Zero-shot CaseHOLD accuracy (acc and byte-normalised acc_norm)."""
+                   autocast: Autocast = no_autocast, items_per_batch: int = 4, return_scores: bool = False) -> dict:
+    """Zero-shot CaseHOLD accuracy (acc, byte-normalised acc_norm, PMI). With `return_scores`, also the
+    per-item log-probs of the 5 endings with the citing context ('cond') and after "(" ('null')."""
     net.eval()
     weight = net.get_output_embeddings().weight
     hits = hits_norm = hits_pmi = 0
+    per_item = []
     for b in range(0, len(items), items_per_batch):
         batch = items[b:b + items_per_batch]
         seqs, starts, nbytes = [], [], []
@@ -151,10 +153,12 @@ def score_casehold(net, tok, items: list[dict], device: torch.device,
             hits += int(np.argmax(s)) == it["label"]
             hits_norm += int(np.argmax([v / n for v, n in zip(s, nb)])) == it["label"]
             hits_pmi += int(np.argmax([v - u for v, u in zip(s, null)])) == it["label"]
+            per_item.append({"cond": s, "null": null, "label": it["label"]})
     n = len(items)
     return {"n": n, "acc": hits / n, "acc_ci95": wilson(hits, n),
             "acc_norm": hits_norm / n, "acc_norm_ci95": wilson(hits_norm, n),
-            "acc_pmi": hits_pmi / n, "acc_pmi_ci95": wilson(hits_pmi, n), "chance": 0.2}
+            "acc_pmi": hits_pmi / n, "acc_pmi_ci95": wilson(hits_pmi, n), "chance": 0.2,
+            **({"scores": per_item} if return_scores else {})}
 
 
 # -------------------------------------------------------------------- held-out bits/byte

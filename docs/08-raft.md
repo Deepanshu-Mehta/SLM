@@ -1309,3 +1309,21 @@ Final epoch, plain vs copy-constrained decoding:
    - for comparison, LR 2e-4 / λ 1.0 at its best epoch scored −0.029 (a different epoch, so only roughly
      comparable);
    - macro-F1 at the end is 0.84, in the same range as the other arms.
+
+### 7.6d CaseHOLD PMI decomposition: PLANNED, approved by the user (written 2026-10-18, before the run)
+- **Question.** Is the CaseHOLD PMI drop real loss of legal reasoning, or a shift in the context-free prior?
+  PMI picks argmax(log P(holding | citing context) − log P(holding | "(")).
+- **Method.** Score all 3,600 test items with the base weights and with `best_pilot.pt` (7.6: −4.4 points).
+  Recompute PMI accuracy with one term swapped at a time:
+  - tuned cond + base null;
+  - base cond + tuned null.
+  Also report the per-item margin changes (correct holding minus the mean of the other four) for each
+  term, with standard errors, and the right→wrong / wrong→right flips.
+  Unit-tested: a synthetic shift in the null term only is attributed entirely to the null term.
+- **Reading, decided before the run:**
+  - If the null term explains most of the drop (swapping only the tuned null reproduces it, and the
+    cond margin is flat), the guard is penalising a prior shift. That supports option 2: accept and
+    document.
+  - If the cond term explains it, the drop is real legal forgetting. That supports option 3, a targeted fix.
+- **Cost.** 1 × L40S, ≈ 4 min, ≈ $0.15, `--max-usd 0.3`, from the $0.93 left of the 7.6 cap.
+  There is nothing to resume: a single short pass.

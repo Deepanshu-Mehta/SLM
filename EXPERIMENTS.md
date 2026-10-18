@@ -405,6 +405,20 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   −2.3 to −5.0 across epochs. 7.6b's −1.1 at λ 1.0 / LR 2e-4 looks like the favourable end of that
   scatter. No tested setting meets the CaseHOLD guard; LR 5e-5 meets the bits/byte guard.
 
+### E-30 · Step 7.6d CaseHOLD PMI decomposition (2026-10-18, $0.125, 1 × L40S)
+- Base vs `best_pilot.pt` (7.6: LR 2e-4, λ 0.25) on all 3,600 test items. PMI accuracy:
+  - base 0.599, tuned 0.555 (−4.4); paired flips 455 vs 297 (z ≈ 5.8);
+  - swapping one term at a time: tuned cond + base null 0.573, base cond + tuned null 0.535.
+- **Margin changes** (correct minus the mean of the others):
+  - cond **−0.32 ± 0.06** nats;
+  - null **−0.26 ± 0.09**;
+  - PMI −0.06 ± 0.08, not significant.
+- **Neither a pure prior shift nor a loss of context use.** Both terms fell about equally, and the
+  context-attributable margin is unchanged on average. The accuracy loss comes from noisier per-item
+  scores.
+- Plain accuracy is unchanged (0.121 → 0.119).
+- Caveat: these are LR 2e-4 weights; 7.6c's LR 5e-5 weights weren't saved.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

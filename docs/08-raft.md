@@ -1327,3 +1327,38 @@ Final epoch, plain vs copy-constrained decoding:
   - If the cond term explains it, the drop is real legal forgetting. That supports option 3, a targeted fix.
 - **Cost.** 1 × L40S, ≈ 4 min, ≈ $0.15, `--max-usd 0.3`, from the $0.93 left of the 7.6 cap.
   There is nothing to resume: a single short pass.
+
+### 7.6d CaseHOLD PMI decomposition: DONE (2026-10-18, $0.125; 7.6 total $3.20 of the $4 cap)
+1 × L40S, 140 s; 0 containers afterwards. Base weights vs `best_pilot.pt` (7.6: LR 2e-4, λ 0.25), all
+3,600 items.
+
+| PMI accuracy | Value | Change |
+|---|---|---|
+| Base (cond and null) | 0.599 | — |
+| Tuned (cond and null) | 0.555 | −4.4 |
+| Tuned cond + base null | 0.573 | −2.6 |
+| Base cond + tuned null | 0.535 | −6.4 |
+
+- **Plain accuracy:** 0.121 → 0.119 (unchanged).
+- **Flips:** 455 right→wrong vs 297 wrong→right. Paired z ≈ 5.8, so the −4.4 is real, not noise.
+- **Margin changes** (nats; correct holding minus the mean of the other four):
+
+  | Term | Change | SE |
+  |---|---|---|
+  | cond | −0.32 | 0.06 |
+  | null | −0.26 | 0.09 |
+  | PMI (cond − null) | **−0.06** | **0.08** (not significant) |
+
+**Reading.** This is neither pre-registered case cleanly.
+- **Both terms moved, about equally.** The tuned model prefers the correct holding less *with* the citing
+  context (cond −0.32) **and** less *without* it (null −0.26).
+  - Each term alone would cost more than the combined −4.4 (−2.6 and −6.4); they partly cancel.
+  - So the drop is not a pure prior shift. Nor is it a clean loss of context use: the context-attributable
+    margin (PMI) is unchanged on average (−0.06 ± 0.08).
+- **The accuracy loss comes from noisier per-item scores.** The two terms move by different amounts on
+  different items, so items near the decision boundary flip; there is no systematic drop in the context
+  signal.
+  - Interpretation: SFT shifted how the model scores holding-style strings generally (the same for both
+    prompts on average, not item by item). It did not, on average, lose what the citing context tells it.
+- **Caveat.** These are 7.6's LR 2e-4 weights. The LR 5e-5 / λ 1.0 final weights from 7.6c (−4.7) weren't
+  saved, so this assumes their CaseHOLD drop has the same make-up.

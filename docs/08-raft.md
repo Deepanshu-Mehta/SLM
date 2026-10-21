@@ -1778,3 +1778,52 @@ of every generation and score are in `.smoke/raft/scale/`.
   only before generation, and the answer constraint's full-vocabulary fallback is slow in Python.
   The 7.8 GPU stage is now **$2.07, $0.07 over its $2 cap**. Fix: the job re-checks the budget before every
   64-row chunk.
+
+### 7.9 Phase 7 closed (2026-10-21, $0)
+**Deliverable:** `slm-125m-raft`, the 125.8M base fine-tuned on 20,340 grounded examples.
+- LR 5e-5, λ 1.0, 3 epochs; checkpoint at step 720 of 1,155, chosen by the dev proxy under `copy2`.
+- Exported at `/data/raft/runs/full/hf` with a greedy generation config and `raft_format.json`
+  (prompt format, refusal string, τ 0.7).
+- **Serving recipe:** the RAFT prompt; the decision s = P(none)/(P(none)+P(Pass)), refusing iff
+  s ≥ 0.7; then copy-constrained decoding (`copy2`: verbatim quote, forced `\nAnswer:` scaffold).
+
+**Final test vs the targets set before any training** (§8.1):
+
+| Metric | Result | Target | |
+|---|---|---|---|
+| Hallucination | 0.325 | 0.15 | ❌ |
+| Refusal recall | 0.780 | 0.80 | ❌ |
+| Over-refusal | 0.048 | 0.20 | ✅ |
+| Grounded accuracy | 0.316 | 0.60 | ❌ |
+| Citation accuracy | 0.903 | 0.80 | ✅ |
+| Quote fidelity | 0.998 | 0.90 | ✅ |
+| Format validity | 1.000 | 0.99 | ✅ |
+| Forgetting: bits/byte | +0.009 | 0.02 | ✅ |
+| Forgetting: CaseHOLD PMI | −4.8 points | | reported, D-23 |
+
+**What worked:**
+- the answer/refuse decision (AUROC 0.92; over-refusal 5%; 86% refusal when the answering passage is
+  removed);
+- verbatim citation through copy-constrained decoding (quote fidelity 0.15 → 1.00);
+- format;
+- keeping forgetting small (LR 5e-5).
+
+**What didn't:** reading within the cited passage.
+- It finds the right passage 90% of the time and gets the answer right about a third of the time.
+- Near misses are refused only 55–61% of the time.
+- Data scaling adds about +0.045 grounded accuracy per doubling.
+- Decoding constraints don't fix wrong-span answers (E-36).
+
+**Spend:** Phase 7 ≈ **$14.70** (plan ≈ $20).
+- 7.8 GPU went $0.07 over its $2 cap (C-15); every other stage stayed within its cap.
+
+**Lessons for later work:**
+1. A pilot that trains 8 epochs on 2K examples memorises. Judge checkpoints on content, not on the
+   decision alone (E-32).
+2. Pre-registered projections need a judged metric, not a proxy that measures something else (C-14).
+3. Near-miss negatives need their own check (V3) and a human read (E-25).
+4. Exclude whole documents, not passages, when a split must stay unseen (E-34).
+5. Budget guards must re-check during long loops (C-15).
+
+**Next (proposed Phase 8, user-approved 2026-10-21):** publish the model to HF, add a grounded
+`/answer` endpoint to the Modal API, and add a RAFT section with a live demo to the website.

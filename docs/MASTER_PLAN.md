@@ -12,7 +12,7 @@ Last updated: 2026-10-16
 | 4 | Tokenize + pack + 99/1 split | CPU fan-out ×14 | ~$0 | **DONE** |
 | 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **≤ $25.32 actual** of $50 cap | **DONE** — val 2.127 / ppl 8.39 / **0.657 bits/byte** |
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 (idle = $0) | **DONE**: model, API and website live |
-| 7 | Grounded SFT / RAFT (answer only from passages, refuse otherwise) | APIs + **GPU H100×1** | ≈ $20 est., $31 staged caps | **PLANNED**: `docs/08-raft.md` (revised 10-16); awaiting approval |
+| 7 | Grounded SFT / RAFT (answer only from passages, refuse otherwise) | APIs + **GPU H100×1** | **≈ $14.70** (≈ $20 est.) | **DONE** 2026-10-21: `docs/08-raft.md` §13. Test: citation 0.90 / quote fidelity 1.00 / format 1.00 / over-refusal 0.05 met; grounded 0.32, hallucination 0.33, recall 0.78 missed |
 
 ---
 
@@ -507,3 +507,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-18 | 7 | **7.6d ✅, $0.125** (1 × L40S; 7.6 total $3.20 of $4): CaseHOLD PMI decomposition on 3,600 items. The −4.4 drop is real (paired z ≈ 5.8). Both terms fell about equally (cond −0.32, null −0.26 nats), and the PMI margin is unchanged on average (−0.06 ± 0.08): a noisier per-item score, not a systematic loss of context use. 0 containers. |
 | 2026-10-21 | 7 | **Review + 7.7 ✅, ≈ $0.61** (account moved to `deepanshu-m23csai`, D-22/D-24; CaseHOLD option 2, D-23). Retrain reproduces 7.6c; τ 0.75 meets both decision targets. Copy-decoding format fixes: format 0.998, quote fidelity 0.993. J1 on dev: grounded accuracy **0.215** (target 0.60) and hallucination **0.349** (0.15) missed; recall 0.815, over-refusal 0.109 met. The bottleneck is reading within the cited passage. Recommendation: go to 7.8. 0 containers. |
 | 2026-10-21 | 7 | **7.8 ✅ (API $6.26, GPU $1.82; Phase 7 ≈ $14.44):** 20K train rows (V3 near-miss check; probe-document fix, E-34; audit OK). Judged dev curve 0.215→0.349 (2K→20K). **Final test:** grounded 0.316, hallucination 0.325, recall 0.780 (all ❌); over-refusal 0.048, citation 0.903, quote fidelity 0.998, format 1.000 (✅); bits/byte +0.009 ✅. Misses recorded, not lowered. 0 containers. |
+| 2026-10-21 | 7 | **7.8b** answer-copy decoding not adopted (E-36; GPU overrun $0.07, C-15). **7.9: Phase 7 closed** (≈ $14.70). Next: Phase 8: publish `slm-125m-raft`, add a grounded `/answer` endpoint, add a RAFT section to the website (user-approved). |

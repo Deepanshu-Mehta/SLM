@@ -251,6 +251,29 @@ def decision_metrics(scores: list[float], refuse_gold: list[bool], buckets: list
             "auroc": auroc([scores[i] for i in sel], [buckets[i] != "A" for i in sel])}
 
 
+def tau_table(scores: list[float], refuse_gold: list[bool], buckets: list[str],
+              grid: tuple[float, ...] = tuple(round(0.05 * i, 2) for i in range(1, 20))) -> list[dict]:
+    """Decision metrics at every tau, plus over-refusal on A and refusal recall on B1+B2+B3."""
+    rows = []
+    for t in grid:
+        a = [x >= t for x, b in zip(scores, buckets) if b == "A"]
+        u = [x >= t for x, b in zip(scores, buckets) if b in ("B1", "B2", "B3")]
+        rows.append({"tau": t, **decision_metrics(scores, refuse_gold, buckets, t),
+                     "over_refusal_A": sum(a) / max(1, len(a)), "recall_B": sum(u) / max(1, len(u))})
+    return rows
+
+
+def choose_tau(table: list[dict], max_over_refusal: float = config.RAFT.max_over_refusal,
+               min_recall: float = config.RAFT.min_refusal_recall) -> dict:
+    """Pre-registered rule (docs/08-raft.md §13, 7.7): highest macro-F1 among taus meeting both
+    targets; if none does, the highest macro-F1 overall, flagged `meets_targets: False`. Ties go to
+    the lower tau (answer more)."""
+    ok = [r for r in table if r["over_refusal_A"] <= max_over_refusal and r["recall_B"] >= min_recall]
+    pool = ok or table
+    best = max(pool, key=lambda r: (r["macro_f1"], -r["tau"]))
+    return {**best, "meets_targets": bool(ok)}
+
+
 def proxy_metrics(rows: list[dict], outputs: list[dict]) -> dict:
     """Deterministic §7.2 proxies from constrained generations on dev rows.
 

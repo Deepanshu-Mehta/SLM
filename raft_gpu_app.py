@@ -4,6 +4,7 @@
     modal run --detach raft_gpu_app.py::lambda_check --confirm --max-usd 1.6   # step 7.6b, 1 x H100
     modal run --detach raft_gpu_app.py::confirm_check --confirm --max-usd 1.4  # step 7.6c, 1 x H100
     modal run --detach raft_gpu_app.py::casehold_check --confirm --max-usd 0.3 # step 7.6d, 1 x L40S
+    modal run --detach raft_gpu_app.py::pilot_eval_check --confirm --max-usd 0.75  # step 7.7a, 1 x H100
 
 One container does the whole pilot sweep:
   1. stage the train token shards on local disk (replay windows are random 2 KB reads);
@@ -42,7 +43,7 @@ RUN_DIR = Path(config.RAFT_DIR) / "runs" / "pilot"
 DATA_DIR = Path(config.RAFT_DIR) / "datasets" / "pilot"
 CASEHOLD = Path(config.RAFT_DIR) / "eval" / "casehold_test.jsonl"
 LOCAL_TRAIN = "/tmp/tokens/train"
-SPENT_76_USD = 3.07        # measured: 7.6 $1.37 (incl. two failed launches) + 7.6b $1.18 + 7.6c $0.52 (§13)
+SPENT_76_USD = 3.20        # measured: 7.6 $1.37 (incl. two failed launches) + 7.6b $1.18 + 7.6c $0.52 + 7.6d $0.125
 
 
 def _rate_per_s() -> float:
@@ -103,7 +104,7 @@ def pilot_sweep(max_usd: float, compile: bool = True) -> dict:
     raw.load_state_dict(base_state)
     net = torch.compile(raw) if compile else raw
     base_cfg = sft.RunConfig(epochs=config.SFT.pilot_max_epochs, gpu=config.SFT.gpu, max_usd=max_usd,
-                             log_every=10_000)
+                             log_every=10_000, replay_weight=0.25, keep="best")   # the 7.6 recipe, pinned
     run_cost = 120 * _rate_per_s()                                     # one 2,000-example run (~95 s estimated) + margin
     budget_ok = lambda: spent() + run_cost < max_usd - 0.6            # keep room for the final guards
     S = config.SFT
@@ -209,7 +210,7 @@ def lambda_sweep(max_usd: float, arms: list[dict], refusal_share: float, n: int,
         sft.init_chat_tokens(raw, config.SFT.seed)
         train = sft.tokenize(sft.select_mix(pool, n, refusal_share, config.SFT.seed), tok, config.SEQ_LEN)
         cfg = sft.RunConfig(lr=lr, epochs=config.SFT.pilot_max_epochs, replay_weight=lam, gpu=config.SFT.gpu,
-                            max_usd=max_usd, log_every=10_000)
+                            max_usd=max_usd, log_every=10_000, keep="best")   # judge= picks best or final
         def extra() -> dict:
             r = {"heldout_pooled_bpb": EF.heldout_bpb(raw, tok, val_dir, subset, device, ac, batch=16)["pooled_bpb"]}
             if per_epoch_casehold:
@@ -337,6 +338,92 @@ def casehold_check(confirm: bool = False, max_usd: float = 0.3):
     print(f"spent ${rep['spent_usd']:.3f} -> {out}")
 
 
+@app.function(image=gpu_image, gpu=f"{config.SFT.gpu}:{config.SFT.gpu_count}", volumes=VOLUMES,
+              timeout=60 * 30, cpu=8.0, memory=32_768)
+def pilot_eval(max_usd: float, compile: bool = True) -> dict:
+    """Step 7.7a: retrain the chosen pilot setting (config.SFT: LR, lambda, refusal share, keep='final'),
+    save the weights, measure the guards, pick tau by the pre-registered rule on a teacher-forced
+    table, and generate on dev at that tau with plain and copy-constrained decoding."""
+    import torch
+    from transformers import AutoTokenizer
+
+    import eval_forgetting as EF
+    import eval_raft as E
+    import sft
+    from data import WindowStore
+    from train import autocast
+
+    t0 = time.time()
+    spent = lambda: (time.time() - t0 + 60.0) * _rate_per_s()
+    log = lambda m: print(f"[{time.time() - t0:7.0f}s ${spent():.2f}] {m}", flush=True)
+    S = config.SFT
+    out_dir = Path(config.RAFT_DIR) / "runs" / "pilot_final"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    device = torch.device("cuda")
+    ac = lambda: autocast(device)
+    shutil.copytree(config.TRAIN_TOKENS_DIR, LOCAL_TRAIN, dirs_exist_ok=True)
+    store = WindowStore.open(LOCAL_TRAIN, config.SEQ_LEN)
+    tok = AutoTokenizer.from_pretrained(config.TOKENIZER_DIR)
+    dec = E.decision_ids(tok)
+    pool = sft.load_rows(DATA_DIR / "train.jsonl")
+    dev = sft.tokenize(sft.load_rows(DATA_DIR / "dev.jsonl"), tok, config.SEQ_LEN)
+    raw = sft.load_init(config.RAFT_INIT_CKPT).to(device)
+    val_dir = Path(config.VAL_TOKENS_DIR)
+    subset = EF.heldout_subset(val_dir)
+    items = [json.loads(ln) for ln in CASEHOLD.read_text().splitlines() if ln.strip()]
+    base = json.loads((RUN_DIR / "guards_base.json").read_text())
+    log(f"staged; base pooled bpb {base['heldout']['pooled_bpb']:.4f}")
+    if spent() + 300 * _rate_per_s() > max_usd:
+        raise SystemExit(f"budget: training would cross --max-usd {max_usd}")
+
+    sft.init_chat_tokens(raw, S.seed)
+    train = sft.tokenize(sft.select_mix(pool, S.pilot_size, S.refusal_share, S.seed), tok, config.SEQ_LEN)
+    cfg = sft.RunConfig(epochs=S.pilot_max_epochs, gpu=S.gpu, max_usd=max_usd, log_every=10_000)
+    log(f"train: n {len(train)} lr {cfg.lr:g} lambda {cfg.replay_weight:g} refusal {S.refusal_share} keep {cfg.keep}")
+    net = torch.compile(raw) if compile else raw
+    res = sft.train_one(cfg, raw, net, train, dev, store, dec, device, None, log=lambda *_: None)
+    torch.save(res["best_state"], out_dir / "final.pt")
+    volume.commit()
+    final = res["best"]
+    log(f"trained: step {final['step']} dev macro-F1 {final['dev_macro_f1']:.3f} AUROC {final['dev_auroc']:.3f}")
+
+    guards = {"heldout": EF.heldout_bpb(raw, tok, val_dir, subset, device, ac, batch=16),
+              "casehold": EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16)}
+    bpb_delta = guards["heldout"]["pooled_bpb"] - base["heldout"]["pooled_bpb"]
+    ch_delta = 100 * (guards["casehold"]["acc_pmi"] - base["casehold"]["acc_pmi"])
+    log(f"guards: bpb delta {bpb_delta:+.4f} | casehold PMI {ch_delta:+.1f} points")
+
+    tf = E.teacher_forced(raw, [r[:n].tolist() for r, n in zip(dev.ids, dev.length)], dev.decision_pos.tolist(),
+                          list(dev.mask), device, dec, 16, ac)
+    table = E.tau_table(tf["s"], dev.refusal.tolist(), dev.buckets)
+    tau = E.choose_tau(table)
+    log(f"tau {tau['tau']}: macro-F1 {tau['macro_f1']:.3f} over-refusal A {tau['over_refusal_A']:.3f} "
+        f"recall B {tau['recall_B']:.3f} meets targets {tau['meets_targets']}")
+
+    prompts, ks = [r["prompt"] for r in dev.rows], [len(r["passages"] or []) for r in dev.rows]
+    gens, proxies = {}, {}
+    for mode in ("plain", "copy"):
+        cp = [r["passages"] or [] for r in dev.rows] if mode == "copy" else None
+        g = E.generate_batch(raw, tok, prompts, ks, device, tau=tau["tau"], batch=64, autocast=ac, copy_passages=cp)
+        gens[mode] = [{"id": r["id"], "bucket": r["bucket"], "s": o["s"], "choice": o["choice"], "text": o["text"]}
+                      for r, o in zip(dev.rows, g)]
+        proxies[mode] = E.proxy_metrics(dev.rows, g)
+        log(f"{mode}: score {proxies[mode]['selection_score']:+.3f} grounded {proxies[mode]['proxy_grounded_acc']:.3f} "
+            f"halluc {proxies[mode]['proxy_hallucination']:.3f} format {proxies[mode]['format_validity']:.3f}")
+        with (out_dir / f"dev_gen_{mode}.jsonl").open("w") as fh:
+            fh.writelines(json.dumps(x) + "\n" for x in gens[mode])
+    report = {"config": {"n": S.pilot_size, "refusal_share": S.refusal_share, "lr": cfg.lr,
+                         "lambda": cfg.replay_weight, "epochs": cfg.epochs, "keep": cfg.keep},
+              "final": final, "history": res["history"], "tau": tau, "tau_table": table,
+              "guards": guards, "bpb_delta": bpb_delta, "casehold_pmi_delta_points": ch_delta,
+              "proxies": proxies, "spent_usd": spent(), "wall_seconds": time.time() - t0}
+    (out_dir / "report.json").write_text(json.dumps(report, indent=2, default=str))
+    volume.commit()
+    return {"report": report, "gens": gens}
+
+
 @app.local_entrypoint()
 def lambda_check(confirm: bool = False, max_usd: float = 1.5):
     """Step 7.6b (paid: 1 x H100). Requires --confirm; draws on the 7.6 cap."""
@@ -379,6 +466,28 @@ def confirm_check(confirm: bool = False, max_usd: float = 1.4):
               f"casehold {r['casehold_pmi_delta_points']:+.1f} copy score {r['copy']['selection_score']:+.3f} "
               f"-> {'PASS' if ok else 'FAIL'}")
     print(f"spent ${rep['spent_usd']:.2f} -> {out}")
+
+
+@app.local_entrypoint()
+def pilot_eval_check(confirm: bool = False, max_usd: float = 0.75):
+    """Step 7.7a (paid: 1 x H100). Requires --confirm; draws on what is left of the 7.6 GPU cap."""
+    if not confirm:
+        raise SystemExit("Step 7.7a uses a GPU and costs money. Re-run with --confirm once approved.")
+    left = config.RAFT_STAGE_CAPS_USD["7.6-pilot-gpu"] - SPENT_76_USD
+    if max_usd > left:
+        raise SystemExit(f"--max-usd {max_usd} exceeds what is left of the 7.6 cap (${left:.2f})")
+    out = pilot_eval.remote(max_usd)
+    d = Path(".smoke/raft/pilot/eval")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "report.json").write_text(json.dumps(out["report"], indent=2, default=str))
+    for mode, rows in out["gens"].items():
+        (d / f"dev_gen_{mode}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows))
+    r = out["report"]
+    print(f"final step {r['final']['step']}: macro-F1 {r['final']['dev_macro_f1']:.3f}; bpb {r['bpb_delta']:+.4f}; "
+          f"casehold {r['casehold_pmi_delta_points']:+.1f}; tau {r['tau']['tau']} (meets {r['tau']['meets_targets']})")
+    for mode, m in r["proxies"].items():
+        print(f"  {mode}: " + " ".join(f"{k} {v:.3f}" for k, v in m.items()))
+    print(f"spent ${r['spent_usd']:.2f} -> {d}")
 
 
 @app.local_entrypoint()

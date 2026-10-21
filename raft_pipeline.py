@@ -12,6 +12,10 @@ Trial (step 7.3):
   python raft_pipeline.py assemble   --stage trial --confirm
   python raft_pipeline.py check      --stage trial --checker ds_off --confirm   (and ds_on, gemini)
   python raft_pipeline.py report     --stage trial
+
+Pilot evaluation (step 7.7b), after raft_gpu_app.py::pilot_eval_check wrote .smoke/raft/pilot/eval/:
+  python raft_pipeline.py judge --stage pilot-eval --confirm     (Gemini J1, both decodings)
+  python raft_pipeline.py score --stage pilot-eval               (§8.1 headline metrics, $0)
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from teacher import DeepSeek, GeminiBatch, Job, Ledger, load_env
 
 T = config.TEACHER
 LOCAL = Path(".smoke/raft")
-STAGE_CAP = {"trial": "7.3-trial", "pilot": "7.4-pilot-data", "scale": "7.8-scale-data"}
+STAGE_CAP = {"trial": "7.3-trial", "pilot": "7.4-pilot-data", "pilot-eval": "7.7-judge", "scale": "7.8-scale-data"}
 TRIAL_PLAN = {"G1": 2 / 3, "G2": 1 / 6, "G3": 1 / 6}
 GEMINI_MAX_TOKENS = 1_024              # Gemini counts thinking inside max_output_tokens
 GEMINI_CHECK_MAX_TOKENS = 384          # trial 7.3: check output+thoughts median 58, max 202 tokens
@@ -581,10 +585,142 @@ def cmd_upload(args) -> None:
             print(f"  {f.name} -> raft/datasets/{args.stage}/{f.name}")
 
 
+# --------------------------------------------------------------------------- 7.7 J1
+EVAL_DIR = LOCAL / "pilot" / "eval"
+MODES = ("plain", "copy")
+
+
+def _parsed(gen: dict) -> dict:
+    import eval_raft as E
+    return E.parse_output(gen["text"])
+
+
+def judge_jobs(rows: dict[str, dict], gens: dict[str, list[dict]]) -> list[Job]:
+    """One J1 call per answered, parseable A or C output (unanswerable items that were answered are
+    hallucinations whatever the answer, so they are not judged). Key: '{id}|{mode}'."""
+    jobs = []
+    for mode, gl in gens.items():
+        for g in gl:
+            r, p = rows[g["id"]], _parsed(g)
+            if r["bucket"] not in ("A", "C") or g["choice"] != "pass" or not p["valid"] or p["refusal"]:
+                continue
+            question = r["question"] if r["bucket"] == "A" else r["task_text"]
+            system, user = P.j1_messages(r["passages"] or [], question, r["answer"], p["answer"])
+            jobs.append(Job(f"{g['id']}|{mode}", system, user, GEMINI_CHECK_MAX_TOKENS))
+    return jobs
+
+
+def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict], mode: str) -> dict:
+    """§8.1 headline metrics for one decoding mode from generations + J1 verdicts. A J1 verdict
+    missing for a judged item counts against the model (not supported, not correct)."""
+    import eval_raft as E
+    n = len(gens)
+    c = Counter()
+    correct_A, refused = {}, {}
+    proxy_vs_j1 = Counter()
+    for g in gens:
+        r, p = rows[g["id"]], _parsed(g)
+        b, answered = r["bucket"], g["choice"] == "pass"
+        c["valid"] += p["valid"]
+        c[f"n_{b}"] += 1
+        refused[g["id"]] = not answered
+        if b in ("B1", "B2", "B3"):
+            c["n_B"] += 1
+            c["refused_B"] += not answered
+            c[f"refused_{b}"] += not answered
+            c["halluc"] += answered
+            continue
+        if not answered:
+            c[f"refused_{b}"] += 1
+            continue
+        v = verdicts.get(f"{g['id']}|{mode}") or {}
+        ok_parse = p["valid"] and not p["refusal"]
+        k_ok = ok_parse and p["k"] and 1 <= p["k"] <= len(r["passages"] or [])
+        has_quote = ok_parse and p["quote"] is not None
+        verbatim = bool(has_quote and k_ok and p["quote"] in r["passages"][p["k"] - 1])
+        if has_quote:
+            c["quoted"] += 1
+            c["verbatim"] += verbatim
+        supported = bool(v.get("supported")) if ok_parse else False
+        if not ok_parse or not supported or (has_quote and not verbatim):
+            c["halluc"] += 1
+        if b == "A":
+            c["answered_A"] += 1
+            cites = bool(k_ok and p["k"] == int(r["k"]))
+            c["cites_oracle"] += cites
+            good = bool(ok_parse and v.get("correct") and cites)
+            c["grounded"] += good
+            correct_A[g["id"]] = good
+            proxy = bool(cites and verbatim and E.token_f1(p["answer"] or "", r["answer"] or "") >= 0.5)
+            proxy_vs_j1[f"proxy_{int(proxy)}_j1_{int(good)}"] += 1
+    pairs = [r for r in rows.values() if r["bucket"] == "B1" and r.get("pair") in rows]
+    paired = [correct_A.get(r["pair"], False) and refused.get(r["id"], False) for r in pairs]
+    nA, nB = max(1, c["n_A"]), max(1, c["n_B"])
+    return {"mode": mode, "n": n,
+            "hallucination": c["halluc"] / n,
+            "refusal_recall": c["refused_B"] / nB,
+            **{f"refusal_recall_{b}": c[f"refused_{b}"] / max(1, c[f"n_{b}"]) for b in ("B1", "B2", "B3")},
+            "over_refusal_A": c["refused_A"] / nA,
+            "grounded_accuracy": c["grounded"] / nA,
+            "citation_accuracy": c["cites_oracle"] / max(1, c["answered_A"]),
+            "quote_fidelity": c["verbatim"] / max(1, c["quoted"]),
+            "format_validity": c["valid"] / n,
+            "paired_consistency": sum(paired) / max(1, len(paired)), "n_pairs": len(pairs),
+            "proxy_vs_j1_on_answered_A": dict(proxy_vs_j1)}
+
+
+def _eval_inputs() -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    rows = {r["id"]: r for r in jsonl(LOCAL / "pilot" / "datasets" / "dev.jsonl")}
+    gens = {m: jsonl(EVAL_DIR / f"dev_gen_{m}.jsonl") for m in MODES}
+    if not all(gens.values()):
+        raise SystemExit(f"missing generations in {EVAL_DIR}: run raft_gpu_app.py::pilot_eval_check first")
+    return rows, gens
+
+
+def cmd_judge(args) -> None:
+    need_confirm(args, "J1 judging (Gemini)")
+    st, lg = sdir(args.stage), ledger(args.stage)
+    rows, gens = _eval_inputs()
+    jobs = judge_jobs(rows, gens)
+    out = st / "j1.jsonl"
+    gb = GeminiBatch(lg)
+    for i in range(0, len(jobs), GEMINI_CHUNK):
+        part = gb.run(jobs[i:i + GEMINI_CHUNK], out, f"raft-{args.stage}-j1-{i // GEMINI_CHUNK}")
+        print(f"  chunk {i // GEMINI_CHUNK}: {part}; stage spend ${lg.spent:.4f} of ${lg.cap:.2f}", flush=True)
+    failed = [r["key"] for r in jsonl(out) if not r["ok"]]
+    if failed:                              # retry failures once (§13 7.7 validation)
+        retry = [j for j in jobs if j.key in set(failed)]
+        kept = [r for r in jsonl(out) if r["ok"]]
+        write_jsonl(out, kept)
+        part = gb.run(retry, out, f"raft-{args.stage}-j1-retry")
+        print(f"  retry {len(retry)}: {part}")
+    print(f"J1: {len(jobs)} jobs; {sum(r['ok'] for r in jsonl(out))} verdicts; spend ${lg.spent:.4f}")
+
+
+def cmd_score(args) -> None:
+    rows, gens = _eval_inputs()
+    verdicts = {r["key"]: r["json"] for r in jsonl(sdir(args.stage) / "j1.jsonl") if r["ok"]}
+    judged = {j.key for j in judge_jobs(rows, gens)}
+    print(f"J1 verdicts for {len(judged & set(verdicts))} of {len(judged)} judged outputs")
+    rep = {m: score_eval(rows, gens[m], verdicts, m) for m in MODES}
+    (sdir(args.stage) / "headline.json").write_text(json.dumps(rep, indent=2))
+    targets = {"hallucination": ("<=", 0.15), "refusal_recall": (">=", 0.80), "over_refusal_A": ("<=", 0.20),
+               "grounded_accuracy": (">=", 0.60), "citation_accuracy": (">=", 0.80),
+               "quote_fidelity": (">=", 0.90), "format_validity": (">=", 0.99)}
+    for m in MODES:
+        print(f"[{m}]")
+        for k, (op, t) in targets.items():
+            v = rep[m][k]
+            ok = v <= t if op == "<=" else v >= t
+            print(f"  {k:20s} {v:.3f}  target {op} {t}  {'ok' if ok else 'MISS'}")
+        print(f"  paired consistency   {rep[m]['paired_consistency']:.3f} ({rep[m]['n_pairs']} pairs); "
+              f"proxy vs J1 {rep[m]['proxy_vs_j1_on_answered_A']}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("cmd", choices=("sources", "generate", "candidates", "assemble", "check", "report",
-                                   "select", "upload"))
+                                   "select", "upload", "judge", "score"))
     p.add_argument("--stage", default="trial", choices=tuple(STAGE_CAP))
     p.add_argument("--n", type=int, default=150)
     p.add_argument("--plan", default="")
@@ -598,7 +734,7 @@ def main() -> None:
     t0 = time.time()
     {"sources": cmd_sources, "generate": cmd_generate, "candidates": cmd_candidates,
      "assemble": cmd_assemble, "check": cmd_check, "report": cmd_report,
-     "select": cmd_select, "upload": cmd_upload}[args.cmd](args)
+     "select": cmd_select, "upload": cmd_upload, "judge": cmd_judge, "score": cmd_score}[args.cmd](args)
     print(f"[{args.cmd}] {time.time() - t0:.0f}s")
 
 

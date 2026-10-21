@@ -230,7 +230,10 @@ class RaftConfig:
     # forgetting guards (§8.2)
     eval_windows_per_source: int = 200
     max_bpb_increase: float = 0.02
-    max_casehold_drop_points: float = 2.0
+    max_casehold_drop_points: float = 2.0   # reported, not gated, since D-23 (recorded as missed: -4.7)
+    # headline targets used to pick tau on dev (§8.1)
+    max_over_refusal: float = 0.20
+    min_refusal_recall: float = 0.80
     seed: int = 1337
 
 
@@ -271,7 +274,8 @@ TEACHER = TeacherConfig()
 RAFT_STAGE_CAPS_USD: Mapping[str, float] = {
     "7.3-trial": 3.0,
     "7.4-pilot-data": 4.0,          # lowered from $10 after the trial re-quote (~$1.90, E-22)
-    "7.6-pilot-gpu": 4.0,
+    "7.6-pilot-gpu": 4.0,           # also covers the 7.7a retrain (what is left of it)
+    "7.7-judge": 1.0,               # Gemini J1 on the pilot candidate (proposed 2026-10-21)
     "7.8-scale-data": 12.0,
     "7.8-full-gpu": 2.0,
 }
@@ -281,7 +285,7 @@ RAFT_STAGE_CAPS_USD: Mapping[str, float] = {
 class SFTConfig:
     """Training recipe (docs/08-raft.md §7.1)."""
 
-    lr: float = 1e-4
+    lr: float = 5e-5                     # D-23 (was 1e-4): LR is the bits/byte lever (E-28, E-29)
     sweep_lrs: tuple[float, ...] = (5e-5, 1e-4, 2e-4)
     sweep_refusal_shares: tuple[float, ...] = (0.15, 0.25, 0.35)
     curve_sizes: tuple[int, ...] = (500, 1_000)
@@ -298,7 +302,9 @@ class SFTConfig:
     epochs: int = 3
     pilot_max_epochs: int = 8
     sft_per_replay: int = 4              # 1 replay window per 4 SFT sequences
-    replay_weight: float = 0.25          # lambda: L = L_sft + lambda * L_replay
+    replay_weight: float = 1.0           # lambda: L = L_sft + lambda * L_replay. D-23 (was 0.25)
+    keep: str = "final"                  # D-23: keep the final epoch; 'best' (by dev macro-F1) is noisy (E-28)
+    refusal_share: float = 0.35          # 7.6 selection; tau trades recall vs over-refusal after training
     weight_decay: float = 0.1
     grad_clip: float = 1.0
     max_new_tokens: int = 128

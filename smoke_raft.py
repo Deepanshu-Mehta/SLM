@@ -299,7 +299,7 @@ def main() -> None:
     assert config.RAFT.k_passages == 4
     caps = config.RAFT_STAGE_CAPS_USD
     check("config: every paid stage has a cap", set(caps) == {"7.3-trial", "7.4-pilot-data", "7.6-pilot-gpu",
-                                                             "7.8-scale-data", "7.8-full-gpu"}, str(dict(caps)))
+                                                             "7.7-judge", "7.8-scale-data", "7.8-full-gpu"}, str(dict(caps)))
     data_checks(tok)
     pipeline_checks(tok)
     teacher_output_checks(tok)
@@ -308,6 +308,7 @@ def main() -> None:
         sft_checks(tok)
     if "--sweep" in sys.argv or "--sft" in sys.argv or "--all" in sys.argv:
         sweep_checks(tok)
+    eval_checks()
     print(f"\n{'ALL CHECKS PASS' if not failures else f'{len(failures)} FAILED: {failures}'}")
     sys.exit(1 if failures else 0)
 
@@ -615,6 +616,12 @@ def sweep_checks(tok) -> None:
           len(calls) == cfg.epochs and [h["step"] for h in r["history"]] == [spe * (i + 1) for i in range(cfg.epochs)]
           and all("heldout_pooled_bpb" in h for h in r["history"]) and "heldout_pooled_bpb" in r["best"],
           f"{len(calls)} calls, steps {[h['step'] for h in r['history']]}")
+    rf = sft.train_one(sft.RunConfig(**{**sft.asdict(cfg), "keep": "final"}), tiny, tiny, train, dev, store, dec,
+                       torch.device("cpu"), None, log=lambda *_: None)
+    same = all(torch.equal(rf["best_state"][k], v.cpu()) for k, v in tiny.state_dict().items())
+    check("keep='final' (D-23): returns the last epoch and exactly the final weights",
+          rf["best"]["step"] == rf["history"][-1]["step"] == rf["steps"] and same,
+          f"best step {rf['best']['step']} of {rf['steps']}")
     tiny.load_state_dict(r["best_state"])
     rows8 = synthetic_rows(8, seed=5)
     gens = E.generate_batch(tiny, tok, [x["prompt"] for x in rows8], [len(x["passages"]) for x in rows8],
@@ -627,6 +634,48 @@ def sweep_checks(tok) -> None:
                                  if p["valid"] and not p["refusal"] and p["quote"] and p["k"] and p["k"] <= len(ps)),
           f"{sum(p['valid'] for p, _ in quotes)}/8 parsed")
 
+
+
+def eval_checks() -> None:
+    """7.7: tau rule, J1 job building and §8.1 scoring on a hand-computed 5-item case (no API)."""
+    import eval_raft as E
+    import raft_pipeline as RP
+
+    print("7.7 evaluation logic")
+    s, b = [0.1, 0.2, 0.6, 0.9, 0.8, 0.4], ["A", "A", "A", "B1", "B2", "B3"]
+    t = E.tau_table(s, [x.startswith("B") for x in b], b)
+    c = E.choose_tau(t)
+    check("tau rule: no tau meets both targets -> best macro-F1, lower tau on ties, flagged",
+          c["tau"] == 0.25 and not c["meets_targets"], str({k: c[k] for k in ("tau", "macro_f1", "meets_targets")}))
+    s2 = [0.1, 0.2, 0.3, 0.9, 0.8, 0.7]
+    c2 = E.choose_tau(E.tau_table(s2, [x.startswith("B") for x in b], b))
+    check("tau rule: separable scores -> a tau meeting both targets", c2["meets_targets"] and c2["macro_f1"] == 1.0,
+          str(c2["tau"]))
+    P4 = ["Acme Corp reported revenue of $5 million in 1990.", "The board met twice.", "Rates rose.", "No change."]
+    ref = " none\nAnswer: " + config.RAFT.refusal
+    rows = {"a1": {"id": "a1", "bucket": "A", "k": "1", "passages": P4, "question": "Revenue?", "answer": "$5 million"},
+            "a2": {"id": "a2", "bucket": "A", "k": "1", "passages": P4, "question": "Year?", "answer": "1990"},
+            "b1": {"id": "b1", "bucket": "B1", "k": None, "passages": P4[1:], "question": "Revenue?", "pair": "a1"},
+            "b2": {"id": "b2", "bucket": "B2", "k": None, "passages": P4, "question": "Profit?"},
+            "c1": {"id": "c1", "bucket": "C", "k": "2", "passages": P4, "task_text": "Summarize Passage 2.",
+                   "answer": "The board met twice."}}
+    gens = [{"id": "a1", "choice": "pass", "text": ' Passage 1\nQuote: "revenue of $5 million"\nAnswer: $5 million'},
+            {"id": "a2", "choice": "none", "text": ref},
+            {"id": "b1", "choice": "none", "text": ref},
+            {"id": "b2", "choice": "pass", "text": ' Passage 1\nQuote: "Acme"\nAnswer: $1 million'},
+            {"id": "c1", "choice": "pass", "text": " Passage 2\nAnswer: The board met three times."}]
+    jobs = RP.judge_jobs(rows, {"copy": gens})
+    check("J1 jobs: only answered, parseable A and C outputs", sorted(j.key for j in jobs) == ["a1|copy", "c1|copy"],
+          str([j.key for j in jobs]))
+    v = {"a1|copy": {"correct": True, "supported": True}, "c1|copy": {"correct": False, "supported": False}}
+    m = RP.score_eval(rows, gens, v, "copy")
+    want = {"hallucination": 0.4, "refusal_recall": 0.5, "over_refusal_A": 0.5, "grounded_accuracy": 0.5,
+            "citation_accuracy": 1.0, "quote_fidelity": 1.0, "format_validity": 1.0, "paired_consistency": 1.0}
+    check("§8.1 scoring matches the hand-computed values", all(abs(m[k] - x) < 1e-9 for k, x in want.items()),
+          str({k: round(m[k], 3) for k in want}))
+    m2 = RP.score_eval(rows, gens, {}, "copy")
+    check("a missing J1 verdict counts against the model", m2["grounded_accuracy"] == 0.0 and m2["hallucination"] == 0.6,
+          str({k: m2[k] for k in ("grounded_accuracy", "hallucination")}))
 
 if __name__ == "__main__":
     main()

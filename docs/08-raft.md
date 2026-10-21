@@ -1372,3 +1372,80 @@ Final epoch, plain vs copy-constrained decoding:
     (−0.06 ± 0.08 nats). Plain accuracy is unchanged.
   - The final evaluation reports CaseHOLD acc / acc_norm / PMI and the 7.6d decomposition for the
     final weights.
+
+### Review of 7.0–7.6d before 7.7 (2026-10-21, $0)
+Everything below was checked against the artifacts (`sweep_report.json`, `lambda_report.json`,
+`confirm_report.json`, `casehold_diag.json`, the Volume after the account move).
+
+**Holding up.**
+- **Data:** quotas exact, dev/test leak-scanned, every dev/test near miss read, and 0 documents shared
+  between dev and test.
+- **Spend:** Phase 7 ≈ $5.75 of the ≈ $20 plan.
+- **Trainer:** 62/62 local checks, including bit-identical resume.
+- **Decision learning:** AUROC 0.92–0.93 in every arm. At the chosen setting, refusal recall is 0.847
+  (target ≥ 0.80) and over-refusal 0.160 (target ≤ 0.20).
+- **Forgetting:** held-out bits/byte solved at LR 5e-5 (+0.005).
+- **Copy decoding:** removes most invented quotes.
+- **Account move:** verified (D-22, D-24).
+
+**Not yet good. Each is either fixed for $0 now or measured in 7.7.**
+1. **Grounded accuracy is the open risk.**
+   - The target is ≥ 0.60, scored by the J1 judge. The chosen pilot setting reaches only **0.193**
+     on the proxy, with copy decoding.
+   - The proxy (token-F1 ≥ 0.5 against a short reference) is probably stricter than J1, but by how
+     much is unknown: **J1 has never been run.**
+   - The learning curve (LR 2e-4, plain) is 0.015 / 0.044 / 0.102 at 500 / 1,000 / 2,000 examples,
+     roughly ×2 per doubling. 10K is ~2.3 more doublings.
+   - Spending ≈ $8 on 7.8 data without knowing the judged number would be guessing. 7.7 measures it.
+2. **Format validity under copy decoding is 0.966** (target ≥ 0.99; plain 0.984). Not yet diagnosed:
+   no generations were saved.
+3. **`config.SFT` still says LR 1e-4 / λ 0.25 / keep the best epoch**, which contradicts D-23 (LR 5e-5,
+   λ 1.0, final epoch). The trainer can only keep the best epoch. Fixed now ($0).
+4. **Nothing from the chosen setting was saved** (7.6c kept no weights or generations), so there is
+   nothing to judge or to set τ on. 7.7 retrains it once and saves everything.
+5. **The refusal share (35%) was chosen at LR 2e-4.** It is kept: τ trades recall against
+   over-refusal after training, and at LR 5e-5 / 35% both targets are already met (7.6c).
+6. **Carried to 7.8, unchanged:**
+   - the train near misses (210) are unreviewed;
+   - G2 prohibitions and a B2-specific check are needed;
+   - `rule_or_holding` is only 6% of A;
+   - the SEC held-out score is optimistic;
+   - dev is 499.
+7. **Correction (C-13):** I called 7.7 "$0" in PROJECT_STATE and in two messages. The plan's 7.7 includes
+   the J1 judge on the final pilot candidate (≈ $0.40), so 7.7 needs spend approval.
+
+### 7.7 Pilot evaluation: PLANNED (written 2026-10-21, before any run; needs spend approval)
+**Goal:** the judged headline metrics (§8.1) for the chosen setting on dev, a pre-registered τ, a
+format-failure diagnosis, and a go/no-go input for 7.8.
+
+**7.7a, GPU** (1 × H100, ≈ $0.45, `--max-usd 0.75`, from the $0.80 left of the 7.6 GPU cap):
+- **Retrain** the chosen setting (n 2,000, refusal 35%, LR 5e-5, λ 1.0, 8 epochs) and keep the final
+  epoch. Save `/data/raft/runs/pilot_final/final.pt`.
+- **Guards on the final weights:** bits/byte (should reproduce 7.6c's +0.0051 within ±0.003) and
+  CaseHOLD (reported, D-23).
+- **τ table** (teacher-forced, τ 0.05–0.95 in steps of 0.05). **Rule:** the highest dev macro-F1 among
+  τ with over-refusal(A) ≤ 0.20 **and** refusal recall(B1+B2+B3) ≥ 0.80. If no τ qualifies, take the
+  highest macro-F1 and record the miss.
+- **Dev generations** at the chosen τ, plain and copy-constrained, saved with s, the choice and the
+  text.
+
+**7.7b, Gemini J1** (batch, new stage cap **$1**; worst case reserved at submit; ≈ $0.50 expected):
+- Judge every dev item the model answered whose output parses, under both decodings (≈ 760 calls).
+- **Scoring per §8.1:**
+  - hallucination = answered an unanswerable item, or J1 `supported = false`, or a non-verbatim quote,
+    or an unparseable answer;
+  - grounded accuracy (A) = J1 correct **and** cites the oracle;
+  - citation accuracy, quote fidelity, format validity, refusal recall / over-refusal, paired
+    consistency;
+  - proxy-vs-J1 agreement on A.
+
+**7.7c, $0:**
+- Diagnose the format failures.
+- Project judged grounded accuracy to 10K with the curve's slope.
+- **Recommendation for 7.8:** go if the projection plausibly reaches the targets; otherwise bring the
+  options to the user.
+
+**Validation:**
+- 7.7a reproduces 7.6c's final-epoch dev macro-F1 within ±0.03 and bits/byte within ±0.003.
+- Every judged item has a J1 verdict (failures retried once).
+- Spend stays within caps; 0 containers afterwards.

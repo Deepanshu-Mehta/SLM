@@ -221,6 +221,7 @@ class RunConfig:
     lr: float = S.lr
     epochs: int = S.epochs
     replay_weight: float = S.replay_weight
+    keep: str = S.keep                 # 'final' (D-23) or 'best' dev macro-F1 epoch
     seq_len: int = config.SEQ_LEN
     batch_sequences: int = S.batch_sequences
     micro: int = S.micro_batch
@@ -246,7 +247,7 @@ def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train:
               log=print, extra_eval=None) -> dict:
     """Train one run. With `out`, writes metrics/ckpt/ledger and resumes from out/ckpt.pt. Returns
     {'best': {...}, 'best_state': CPU state dict or None, 'status', 'steps', 'plan', 'history': every dev
-    eval}. `extra_eval()` (optional) returns more metrics to merge into each dev eval."""
+    eval}. 'best' is the best dev macro-F1 epoch, or the final epoch with keep='final'. `extra_eval()` (optional) returns more metrics to merge into each dev eval."""
     plan = make_plan(len(train), cfg.epochs, cfg.seq_len, cfg.batch_sequences, cfg.micro, cfg.sft_per_replay)
     order = StreamOrder(len(train), cfg.seed)
     end = min(plan.total_steps, cfg.max_steps) if cfg.max_steps else plan.total_steps
@@ -342,6 +343,11 @@ def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train:
         if stop:
             log(f"[stop] budget: spend over --max-usd {cfg.max_usd}")
             break
+    if cfg.keep == "final" and status == "completed":      # D-23: the last epoch, not the noisy best
+        best = {**history[-1]} if history else {"step": end}
+        best_state = {k: v.detach().to("cpu", copy=True) for k, v in raw.state_dict().items()}
+        if out:
+            atomic_torch_save(best_state, paths["best"])
     if ledger:
         ledger.write(paths["ledger"])
     return {"status": status, "steps": end, "best": best, "best_state": best_state, "plan": asdict(plan),

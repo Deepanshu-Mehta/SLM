@@ -9,6 +9,7 @@ from typing import Mapping
 PROJECT = "slm-125m"
 HF_REPO = "Deepanshu027/slm-125m-base"  # Phase 6 push target (the HF account the write token belongs to)
 HF_SPACE = "Deepanshu027/slm-125m-api"  # Docker Space target; NOT created (HF needs PRO for Docker Spaces)
+HF_RAFT_REPO = "Deepanshu027/slm-125m-raft"  # Phase 8: the grounded SFT model (docs/09-raft-release.md)
 API_URL = "https://deepanshu-m23csai--slm-125m-serve-api.us-east.modal.run"  # live API: serve_modal.py (Modal CPU, scale-to-zero)
 SITE_URL = "https://slm-125m-legal-sandy.vercel.app"  # website (Vercel)
 

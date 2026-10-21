@@ -37,7 +37,7 @@ gpu_image = (
     .apt_install("gcc")
     .pip_install("torch==2.5.1", "transformers==4.46.3", "numpy==2.1.3", "safetensors==0.4.5")
     .add_local_python_source("config", "model", "data", "train", "cleaning", "raft_data", "eval_raft",
-                             "eval_forgetting", "sft")
+                             "raft_decode", "eval_forgetting", "sft")
 )
 volume = modal.Volume.from_name(config.VOLUME_NAME, create_if_missing=True)
 VOLUMES = {config.DATA_ROOT: volume}

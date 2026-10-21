@@ -8,7 +8,7 @@ and serving. Compute cost: **≤ $25.32**.
 
 **[Try it in the browser](https://slm-125m-legal-sandy.vercel.app)** ·
 **[Model on Hugging Face](https://huggingface.co/Deepanshu027/slm-125m-base)** ·
-**[API docs](https://mdeepanshu2706--slm-125m-serve-api.modal.run/docs)** ·
+**[API docs](https://deepanshu-m23csai--slm-125m-serve-api.us-east.modal.run/docs)** ·
 **[How it was built, visually](https://slm-125m-legal-sandy.vercel.app/build)**
 
 > **This is a base model.** It continues text; it does not follow instructions or chat. It writes

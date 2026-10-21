@@ -1362,3 +1362,13 @@ Final epoch, plain vs copy-constrained decoding:
     prompts on average, not item by item). It did not, on average, lose what the citing context tells it.
 - **Caveat.** These are 7.6's LR 2e-4 weights. The LR 5e-5 / λ 1.0 final weights from 7.6c (−4.7) weren't
   saved, so this assumes their CaseHOLD drop has the same make-up.
+
+### Decision after 7.6c/7.6d (2026-10-21, the user's choice: option 2; D-23)
+- 7.8 trains at **LR 5e-5, λ 1.0**, keeping the **final epoch**.
+- **Held-out bits/byte stays a gate** (+0.02).
+- **CaseHOLD PMI becomes a reported metric, not a gate.** The −2 point limit is recorded as **missed**
+  (7.6c: −4.7), not removed.
+  - Why: E-30 shows the drop is noisier per-item scores, with the mean context margin unchanged
+    (−0.06 ± 0.08 nats). Plain accuracy is unchanged.
+  - The final evaluation reports CaseHOLD acc / acc_norm / PMI and the 7.6d decomposition for the
+    final weights.

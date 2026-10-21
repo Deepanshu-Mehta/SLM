@@ -9,7 +9,7 @@ from typing import Mapping
 PROJECT = "slm-125m"
 HF_REPO = "Deepanshu027/slm-125m-base"  # Phase 6 push target (the HF account the write token belongs to)
 HF_SPACE = "Deepanshu027/slm-125m-api"  # Docker Space target; NOT created (HF needs PRO for Docker Spaces)
-API_URL = "https://mdeepanshu2706--slm-125m-serve-api.modal.run"  # live API: serve_modal.py (Modal CPU, scale-to-zero)
+API_URL = "https://deepanshu-m23csai--slm-125m-serve-api.us-east.modal.run"  # live API: serve_modal.py (Modal CPU, scale-to-zero)
 SITE_URL = "https://slm-125m-legal-sandy.vercel.app"  # website (Vercel)
 
 VOLUME_NAME = "slm-125m"

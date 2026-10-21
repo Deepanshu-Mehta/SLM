@@ -25,11 +25,11 @@ continues it. It does not follow instructions or chat.
 | GET | `/docs` | interactive OpenAPI docs |
 
 Live deployment: **Modal CPU, scale-to-zero** (`serve_modal.py` at the repo root), at
-`https://mdeepanshu2706--slm-125m-serve-api.modal.run`. The `Dockerfile` and the front matter
+`https://deepanshu-m23csai--slm-125m-serve-api.us-east.modal.run`. The `Dockerfile` and the front matter
 above package the same server as a Hugging Face Docker Space, which requires an HF PRO account.
 
 ```bash
-curl -X POST https://mdeepanshu2706--slm-125m-serve-api.modal.run/generate \
+curl -X POST https://deepanshu-m23csai--slm-125m-serve-api.us-east.modal.run/generate \
   -H 'content-type: application/json' \
   -d '{"prompt": "The court held that the defendant", "max_new_tokens": 60}'
 ```

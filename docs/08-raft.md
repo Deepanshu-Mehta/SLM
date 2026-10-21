@@ -1742,3 +1742,39 @@ third of the time).
 **Artifacts:** `/data/raft/runs/full/` holds `n5000.pt`, `n10000.pt`, `n20000.pt`, `hf/` (the 20K model,
 greedy config, `raft_format.json` with τ 0.7), `final.json`, `results.jsonl` and `log.txt`. Local copies
 of every generation and score are in `.smoke/raft/scale/`.
+
+### 7.8b Answer-copy decoding experiment: PLANNED (written 2026-10-21, before any run; user-approved)
+- **Why.** On test, unsupported A answers are 15.3% of all items, the largest share of hallucination.
+  79.0% of the train A answers are spans of the cited passage (63.3% exact, 15.6% differing in case);
+  10.0% are Yes/No; 11.1% are paraphrases.
+- **What (`copy3` = `copy2` + answer copy).** After `Answer:` in an output that has a Quote line, the
+  answer must be a case-insensitive span of the cited passage, or exactly `Yes`/`No` (optionally with
+  "."). `<|eos|>` is allowed only once the answer is non-empty and valid. Summaries and lists (no
+  Quote line) are unconstrained. Answer cap 200 characters.
+- **Run.** The 20K weights (`n20000.pt`), τ 0.7, dev only (499 items), 1 × L40S (≈ $0.07, from the
+  $0.18 left of the 7.8 GPU cap). J1 on changed outputs only (≈ $0.10, 7.8 cap).
+- **Adoption rule, fixed before the run:**
+  - **Adopt** if dev hallucination falls by **≥ 0.03** and J1 grounded accuracy falls by **≤ 0.01**,
+    against `copy2` on the same weights and τ.
+  - **If adopted,** the test set is scored a second time, with `copy3`, and labelled as a second test
+    use. The first test numbers stay the headline of record.
+
+### 7.8b Answer-copy decoding experiment: DONE, not adopted (2026-10-21; GPU $0.245, J1 $0.017)
+- **Effect.** 64 of 499 dev outputs changed; the rest are identical to `copy2` and reuse their verdicts.
+
+  | Dev (20K, τ 0.7) | `copy2` | `copy3` | Change |
+  |---|---|---|---|
+  | Hallucination | 0.309 | 0.299 | **−0.010** |
+  | Grounded accuracy | 0.349 | 0.367 | **+0.018** |
+  | Paired consistency | 0.253 | 0.280 | +0.027 |
+  | Refusal recall | 0.871 | 0.879 | +0.008 (L40S vs H100 numerics near τ) |
+  | Citation, quote fidelity, format | unchanged | unchanged | |
+
+- **Rule:** hallucination had to fall by ≥ 0.03. It fell by 0.010, so **`copy3` is not adopted and the test
+  set is not re-scored.**
+- **Why so small.** The unsupported answers are mostly already spans of the cited passage, just the
+  wrong span (the reading problem in E-31/E-32). Forcing a span can't fix that.
+- **Budget overrun (C-15).** The regeneration cost **$0.245 against `--max-usd 0.15`**: the guard checked
+  only before generation, and the answer constraint's full-vocabulary fallback is slow in Python.
+  The 7.8 GPU stage is now **$2.07, $0.07 over its $2 cap**. Fix: the job re-checks the budget before every
+  64-row chunk.

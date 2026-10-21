@@ -741,6 +741,19 @@ def copy_constraint_checks() -> None:
         p = E.parse_output(text + " x")
         ok += bool(p["valid"] and p["quote"] and p["quote"] in src)
     check("copy: 5 random-logit walks all yield a valid, verbatim, closed quote", ok == 5, f"{ok}/5")
+    ok = 0
+    for seed in range(8):                                  # 7.8b answer copy: random walks after `Answer:`
+        gg = torch.Generator().manual_seed(100 + seed)
+        text = ' Passage 1\nQuote: "revenue of $5 million"\nAnswer:'
+        cc5 = E.CopyConstraint(tok, W, [[src]], vocab, answer_copy=True, eos_id=1)
+        for _ in range(40):
+            i = step(text, torch.randn(len(vocab), generator=gg), cc5)
+            if i == 1:
+                break
+            text += vocab[i]
+        a = text.split("\nAnswer:", 1)[1]
+        ok += bool(a.strip()) and (a.strip().rstrip(".").lower() in src.lower() or a in E._YES_NO)
+    check("answer copy: 8 random-logit walks all end in a passage span or Yes/No", ok == 8, f"{ok}/8")
 
 if __name__ == "__main__":
     main()

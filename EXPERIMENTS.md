@@ -483,6 +483,10 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Teacher ceiling** 1.00 / 0.01 / 0.96 (inflated by construction).
 - **Conclusion:** the gap is the 125M student's reading. Reaching 0.60 by data alone would take on the order of 1M examples.
 
+### E-36 · 7.8b answer-copy decoding on dev (2026-10-21; $0.26)
+- **Effect:** `copy3` vs `copy2` on the 20K weights: hallucination 0.309 → 0.299, grounded 0.349 → 0.367; 64 of 499 outputs changed.
+- **Not adopted.** The pre-registered bar was −0.03 hallucination. The unsupported answers are already spans: wrong spans.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -533,3 +537,4 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | C-12 | 7.6b rule: forgetting grows with steps, so extrapolate the per-epoch bits/byte linearly to 7.8's 579 steps | Forgetting peaks at epochs 2–3 and recovers as the cosine LR anneals; the linear fit extrapolated the recovery | The rule was written before seeing any per-epoch data. Its pick isn't adopted; measured end-of-run numbers are used (E-28) |
 | C-13 | 7.7 is "$0" (PROJECT_STATE and two messages, 10-18/10-21) | 7.7 includes the J1 judge on the pilot candidate (≈ $0.50 for both decodings) plus a ≈ $0.45 GPU retrain | I misread the plan's step table (§5 says ≈ $0.40); caught in the review before 7.7 |
 | C-14 | (a) Keep the best-decision-F1 / final epoch (§7.1, D-23); (b) 10K → grounded 0.30–0.45 (E-31) | (a) Select on the dev proxy score under `copy2` (content + decisions); (b) no judged learning curve exists yet, so no projection | (a) Answer content overfits from epoch 3 while decision-F1 still rises (E-32). (b) The projection used the plain-decoding proxy, which measured invented quotes |
+| C-15 | 7.8b regeneration capped at `--max-usd 0.15` | It cost $0.245; the 7.8 GPU stage is $2.07, $0.07 over its $2 cap | The guard checked only before generation, and the answer constraint's fallback is slow. Fixed: the budget is re-checked per 64-row chunk |

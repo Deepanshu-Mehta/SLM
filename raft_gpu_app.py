@@ -643,6 +643,57 @@ def full_check(confirm: bool = False, max_usd: float = 2.0, compile: bool = True
     print(f"status {rep['status']}; spent ${rep['spent_usd']:.2f} -> {d}")
 
 
+SPENT_78_GPU_USD = 2.07    # measured: 7.8 full_run $1.82 + 7.8b regen $0.245 (over the $2 cap, C-15)
+
+
+@app.function(image=gpu_image, gpu=DIAG_GPU, volumes=VOLUMES, timeout=60 * 20, cpu=8.0, memory=16_384)
+def answer_copy_regen(max_usd: float, group: str = "dev") -> dict:
+    """7.8b: generations with copy3 (copy2 + answer copy) from the 20K weights at the 7.8 tau."""
+    import torch
+    from transformers import AutoTokenizer
+
+    import eval_raft as E
+    import sft
+    from train import autocast
+
+    t0 = time.time()
+    spent = lambda: (time.time() - t0 + 60.0) * config.GPU_RATE_PER_SEC[DIAG_GPU] * config.COST_OVERHEAD_FACTOR
+    device = torch.device("cuda")
+    tok = AutoTokenizer.from_pretrained(config.TOKENIZER_DIR)
+    data = sft.tokenize(sft.load_rows(SCALE_DIR / f"{group}.jsonl"), tok, config.SEQ_LEN)
+    raw = sft.load_init(config.RAFT_INIT_CKPT).to(device)
+    raw.load_state_dict(torch.load(FULL_DIR / "n20000.pt", map_location=device, weights_only=False))
+    tau = json.loads((FULL_DIR / "final.json").read_text())["tau"]
+    g, t_chunk = [], 0.0
+    for i in range(0, len(data.rows), 64):         # C-15: re-check the budget before every chunk
+        if spent() + t_chunk * config.GPU_RATE_PER_SEC[DIAG_GPU] * config.COST_OVERHEAD_FACTOR > max_usd:
+            raise SystemExit(f"budget: the next chunk would cross --max-usd {max_usd} ({len(g)} rows done)")
+        t1, part = time.time(), data.rows[i:i + 64]
+        g += E.generate_batch(raw, tok, [r["prompt"] for r in part], [len(r["passages"] or []) for r in part],
+                              device, tau=tau, batch=64, autocast=lambda: autocast(device),
+                              copy_passages=[r["passages"] or [] for r in part], answer_copy=True)
+        t_chunk = max(t_chunk, time.time() - t1)
+    gens = [{"id": r["id"], "bucket": r["bucket"], "s": o["s"], "choice": o["choice"], "text": o["text"]}
+            for r, o in zip(data.rows, g)]
+    return {"gens": gens, "proxies": E.proxy_metrics(data.rows, g), "tau": tau, "spent_usd": spent()}
+
+
+@app.local_entrypoint()
+def answer_copy_check(confirm: bool = False, max_usd: float = 0.15, group: str = "dev"):
+    """7.8b (paid: 1 x L40S). Requires --confirm; draws on what is left of the 7.8 GPU cap."""
+    if not confirm:
+        raise SystemExit("This uses a GPU and costs money. Re-run with --confirm once approved.")
+    left = config.RAFT_STAGE_CAPS_USD["7.8-full-gpu"] - SPENT_78_GPU_USD
+    if max_usd > left:
+        raise SystemExit(f"--max-usd {max_usd} exceeds what is left of the 7.8 GPU cap (${left:.2f})")
+    out = answer_copy_regen.remote(max_usd, group)
+    name = "dev_n20000_copy3" if group == "dev" else f"{group}_copy3"
+    path = Path(".smoke/raft/scale/eval") / f"{name}.jsonl"
+    path.write_text("".join(json.dumps(x) + "\n" for x in out["gens"]))
+    print(f"tau {out['tau']}: " + " ".join(f"{k} {v:.3f}" for k, v in out["proxies"].items()))
+    print(f"spent ${out['spent_usd']:.3f} -> {path}")
+
+
 @app.local_entrypoint()
 def lambda_check(confirm: bool = False, max_usd: float = 1.5):
     """Step 7.6b (paid: 1 x H100). Requires --confirm; draws on the 7.6 cap."""

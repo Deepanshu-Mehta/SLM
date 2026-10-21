@@ -81,6 +81,7 @@ class RaftConstraint(LogitsProcessor):
 
 
 _QUOTE_OPEN = re.compile(r'^ Passage (\d)\nQuote: "(.*)$', re.S)
+_YES_NO = (" Yes", " No", " Yes.", " No.")
 
 
 class CopyConstraint(LogitsProcessor):
@@ -100,9 +101,11 @@ class CopyConstraint(LogitsProcessor):
     SCAFFOLD = "\nAnswer:"
 
     def __init__(self, tok, prompt_width: int, passages: list[list[str]], vocab: list[str], top: int = 256,
-                 max_quote_chars: int = 240):
+                 max_quote_chars: int = 240, answer_copy: bool = False, max_answer_chars: int = 200,
+                 eos_id: int = 1):
         self.tok, self.width, self.passages, self.vocab, self.top = tok, prompt_width, passages, vocab, top
         self.max_quote_chars = max_quote_chars
+        self.answer_copy, self.max_answer_chars, self.eos_id = answer_copy, max_answer_chars, eos_id
         self.close_id = vocab.index('"')
         self.fallbacks = 0                         # forced closes: nothing continued the copy
 
@@ -110,6 +113,28 @@ class CopyConstraint(LogitsProcessor):
         keep = scores[b, allowed].clone()
         scores[b] = -math.inf
         scores[b, allowed] = keep
+
+    def _answer(self, scores: torch.FloatTensor, b: int, a: str, src: str) -> None:
+        """7.8b answer copy: the answer is a case-insensitive span of the cited passage, or Yes/No;
+        <|eos|> only once it is non-empty and valid."""
+        low = src.lower()
+        done = bool(a.strip()) and (a.strip().rstrip(".").lower() in low or a in _YES_NO)
+        if len(a) >= self.max_answer_chars:
+            self._restrict(scores, b, [self.eos_id])
+            return
+        allowed = [self.eos_id] if done else []
+        cands = torch.topk(scores[b], self.top).indices.tolist()
+        for pool in (cands, range(len(self.vocab))):     # full vocab only if the top candidates fail
+            for i in pool:
+                t = self.vocab[i]
+                if not t or "\n" in t or "<|" in t:
+                    continue
+                x = a + t
+                if (x.lstrip() or x == " ") and (x.lstrip().lower() in low or any(y.startswith(x) for y in _YES_NO)):
+                    allowed.append(i)
+            if len(allowed) > (1 if done else 0):
+                break
+        self._restrict(scores, b, allowed or [self.eos_id])
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if input_ids.shape[1] - self.width < 3:
@@ -122,7 +147,11 @@ class CopyConstraint(LogitsProcessor):
             k, rest = int(m.group(1)), m.group(2)
             if '"' in rest:                        # closed: force the `\nAnswer:` scaffold
                 tail = rest.split('"', 1)[1]
-                if tail.startswith(self.SCAFFOLD) or not self.SCAFFOLD.startswith(tail):
+                if tail.startswith(self.SCAFFOLD):
+                    if self.answer_copy and 1 <= k <= len(self.passages[b]):
+                        self._answer(scores, b, tail[len(self.SCAFFOLD):], self.passages[b][k - 1])
+                    continue
+                if not self.SCAFFOLD.startswith(tail):
                     continue
                 need = self.SCAFFOLD[len(tail):]
                 allowed = [i for i, t in enumerate(self.vocab) if t and need.startswith(t)]
@@ -151,7 +180,8 @@ class CopyConstraint(LogitsProcessor):
 @torch.no_grad()
 def generate_batch(net, tok, prompts: list[str], ks: list[int], device: torch.device,
                    tau: float | None = 0.5, max_new: int = config.SFT.max_new_tokens,
-                   batch: int = 32, autocast=None, copy_passages: list[list[str]] | None = None) -> list[dict]:
+                   batch: int = 32, autocast=None, copy_passages: list[list[str]] | None = None,
+                   answer_copy: bool = False) -> list[dict]:
     """Greedy constrained generation. Returns [{'s', 'choice', 'text'}] where text starts after
     `Source:` (prepend 'Source:' to parse)."""
     ids = decision_ids(tok)
@@ -170,7 +200,8 @@ def generate_batch(net, tok, prompts: list[str], ks: list[int], device: torch.de
         if copy_passages is not None:
             if not hasattr(generate_batch, "_vocab"):
                 generate_batch._vocab = [tok.decode([j]) for j in range(len(tok))]
-            procs.append(CopyConstraint(tok, width, copy_passages[i:i + batch], generate_batch._vocab))
+            procs.append(CopyConstraint(tok, width, copy_passages[i:i + batch], generate_batch._vocab,
+                                        answer_copy=answer_copy, eos_id=M.EOS_TOKEN_ID))
         ctx = autocast() if autocast else torch.autocast("cpu", enabled=False)
         with ctx:
             # An explicit config: the base model's saved one has min_new_tokens=16 and sampling,

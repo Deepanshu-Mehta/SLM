@@ -883,7 +883,7 @@ def _eval_inputs(stage: str = "pilot-eval") -> tuple[dict[str, dict], dict[str, 
         d = LOCAL / "scale" / "eval"
         rows = {r["id"]: r for g in ("dev", "test") for r in jsonl(LOCAL / "scale" / "datasets" / f"{g}.jsonl")}
         gens = {f.stem: jsonl(f) for f in sorted(d.glob("*.jsonl"))
-                if f.stem.startswith("test_") or f.stem.endswith("_copy2")}
+                if f.stem.startswith("test_") or f.stem.endswith(("_copy2", "_copy3"))}
         if not gens:
             raise SystemExit(f"no generations in {d}: run raft_gpu_app.py::full_check first")
         return rows, gens
@@ -895,9 +895,13 @@ def _eval_inputs(stage: str = "pilot-eval") -> tuple[dict[str, dict], dict[str, 
 
 
 def _reused(gens: dict[str, list[dict]]) -> dict[str, str]:
-    """copy2 outputs whose text equals the copy output: '{id}|copy2' -> '{id}|copy' (not re-judged)."""
-    old = {g["id"]: g["text"] for g in gens.get("copy", [])}
-    return {f"{g['id']}|copy2": f"{g['id']}|copy" for g in gens.get("copy2", []) if old.get(g["id"]) == g["text"]}
+    """Outputs identical to an already-judged decoding are not re-judged: 'copy2' vs 'copy' (7.7),
+    '*_copy3' vs '*_copy2' (7.8b). Returns new key -> judged key."""
+    out = {}
+    for new, base in [("copy2", "copy")] + [(k, k[:-1] + "2") for k in gens if k.endswith("_copy3")]:
+        old = {g["id"]: g["text"] for g in gens.get(base, [])}
+        out.update({f"{g['id']}|{new}": f"{g['id']}|{base}" for g in gens.get(new, []) if old.get(g["id"]) == g["text"]})
+    return out
 
 
 def cmd_judge(args) -> None:

@@ -108,6 +108,15 @@ A statement about a DIFFERENT year, entity, facility or metric does not count.
 
 Reply with JSON only: {"plausible_answer": true or false, "why": "..."}"""
 
+CEIL_SYSTEM = """Answer the question using ONLY the numbered passages below (no outside knowledge).
+- If no passage states the answer, reply {"source": "none", "quote": null, "answer": null}.
+- Otherwise give the number of the passage that states it, the shortest exact span of that passage
+  (at most 40 words, copied character for character) that contains the answer, and a brief answer.
+- If it is an instruction about one passage (summarize, list, yes/no), follow it using that passage;
+  "quote" may be null for summaries and lists.
+
+Reply with JSON only: {"source": 2, "quote": "...", "answer": "..."}"""
+
 J1_SYSTEM = """You grade a small model's answer. Use ONLY the passages; ignore outside knowledge.
 - correct: the model's answer means the same as the reference answer. Missing the key fact, or
   adding a wrong claim, makes it false.

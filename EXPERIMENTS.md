@@ -461,6 +461,28 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   are cited, 0 dev/test documents are used. The 7.7 pilot model also trained on 57 such rows; its probe was
   never evaluated.
 
+### E-35 · Step 7.8: 20K data, learning curve, final test (2026-10-21; API $6.26, GPU $1.82)
+- **Data:** 20,340 train rows (audit OK).
+- **Judged dev curve** (grounded accuracy): 2K 0.215, 5K 0.273, 10K 0.287, 20K 0.349, about +0.045 per doubling.
+- **Final test** (20K, τ 0.7, copy2):
+
+  | Metric | Value | Target | |
+  |---|---|---|---|
+  | Grounded accuracy | **0.316** | 0.60 | ❌ |
+  | Hallucination | **0.325** | 0.15 | ❌ |
+  | Refusal recall | **0.780** | 0.80 | ❌ |
+  | Over-refusal | 0.048 | | ✅ |
+  | Citation | 0.903 | | ✅ |
+  | Quote fidelity | 0.998 | | ✅ |
+  | Format | 1.000 | | ✅ |
+  | AUROC | 0.923 | reported | |
+
+- **Hallucination** = unsupported A 15.3% + unsupported C 10.6% + answered B2 4.4% + answered B1 2.2%.
+  B2 refusal recall is only 0.55–0.61.
+- **Forgetting:** bits/byte +0.009 ✅; CaseHOLD PMI −4.8 (reported).
+- **Teacher ceiling** 1.00 / 0.01 / 0.96 (inflated by construction).
+- **Conclusion:** the gap is the 125M student's reading. Reaching 0.60 by data alone would take on the order of 1M examples.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

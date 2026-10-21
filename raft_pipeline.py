@@ -741,6 +741,47 @@ def cmd_audit(args) -> None:
     print("audit: OK" if not bad else f"audit: buckets over {AUDIT_MAX_DISAGREE:.0%}: {bad} -> stop and report")
 
 
+CEILING_N = 200
+
+
+def ceiling_rows() -> list[dict]:
+    """200 random test items for the teacher ceiling (§8.3), every bucket, fixed seed."""
+    return random.Random(config.RAFT.seed).sample(jsonl(LOCAL / "scale" / "datasets" / "test.jsonl"), CEILING_N)
+
+
+def ceiling_text(j: dict | None) -> tuple[str, str]:
+    """DeepSeek's JSON answer rendered in the student's output format -> (choice, text after `Source:`)."""
+    src = (j or {}).get("source")
+    if j is None or src in (None, "none", 0, "0"):
+        return "none", " none\nAnswer: " + config.RAFT.refusal
+    k = int(str(src).strip().split()[-1]) if str(src).strip().split()[-1].isdigit() else 0
+    quote = f'\nQuote: "{j["quote"]}"' if j.get("quote") else ""
+    return "pass", f" Passage {k}{quote}\nAnswer: {j.get('answer') or ''}"
+
+
+def cmd_ceiling(args) -> None:
+    """7.8 teacher ceiling (§8.3): DeepSeek answers 200 test items in the student's format; the
+    result is written as test-set generations named `ceiling` for J1 + score. Inflated by
+    construction (test items were kept only where DeepSeek's check agreed): an upper bound."""
+    need_confirm(args, "Teacher ceiling (DeepSeek)")
+    st, lg = sdir("scale"), ledger("scale")
+    rows = ceiling_rows()
+    jobs = []
+    for r in rows:
+        q = r["question"] if r["bucket"] != "C" else r["task_text"]
+        user = (P.passages_block(r["passages"]) if r["passages"] else "(no passages)") + f"\nQuestion: {q}"
+        jobs.append(Job(f"{r['id']}|ceiling", P.CEIL_SYSTEM, user, T.max_tokens_check))
+    out = st / "ceiling-raw.jsonl"
+    stats = DeepSeek(lg, allow_peak=args.allow_peak, workers=args.workers).run(jobs, out)
+    got = {x["key"].split("|")[0]: (x["json"] if x["ok"] else None) for x in jsonl(out)}
+    gens = []
+    for r in rows:
+        choice, text = ceiling_text(got.get(r["id"]))
+        gens.append({"id": r["id"], "bucket": r["bucket"], "s": None, "choice": choice, "text": text})
+    write_jsonl(st / "eval" / "ceiling_copy2.jsonl", gens)     # picked up by judge/score as a scored set
+    print(f"ceiling: {stats}; stage spend ${lg.spent:.4f} of ${lg.cap:.2f}")
+
+
 def cmd_upload(args) -> None:
     """Upload the selected datasets to the Volume (raft/datasets/{stage}/)."""
     modal, _ = _modal()
@@ -905,7 +946,7 @@ def cmd_score(args) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("cmd", choices=("sources", "generate", "candidates", "assemble", "check", "report",
-                                   "select", "upload", "judge", "score", "audit"))
+                                   "select", "upload", "judge", "score", "audit", "ceiling"))
     p.add_argument("--stage", default="trial", choices=tuple(STAGE_CAP))
     p.add_argument("--n", type=int, default=150)
     p.add_argument("--plan", default="")
@@ -920,7 +961,7 @@ def main() -> None:
     {"sources": cmd_sources, "generate": cmd_generate, "candidates": cmd_candidates,
      "assemble": cmd_assemble, "check": cmd_check, "report": cmd_report,
      "select": cmd_select_scale if args.stage == "scale" else cmd_select, "upload": cmd_upload,
-     "judge": cmd_judge, "score": cmd_score, "audit": cmd_audit}[args.cmd](args)
+     "judge": cmd_judge, "score": cmd_score, "audit": cmd_audit, "ceiling": cmd_ceiling}[args.cmd](args)
     print(f"[{args.cmd}] {time.time() - t0:.0f}s")
 
 

@@ -1675,3 +1675,70 @@ Phase 7 would end at ≈ $14.4.
   - Overlap: dev/test documents 0; probe documents cited 0; probe documents as context only 257.
   - `rule_or_holding` is 8.8% of A (pilot 6%).
   - Max 809 tokens.
+
+### 7.8 Results: DONE (2026-10-21; data/API $6.26 of $12, GPU $1.82 of $2)
+**Data.**
+- 20,340 train rows; the 5% Gemini audit passed (disagreement A 4.3% / B1 0.5% / B2 7.3% / C 6.5%,
+  limit 15%).
+- Uploaded to `/data/raft/datasets/scale/` (dev/test/probe unchanged).
+
+**Learning curve on dev** (LR 5e-5, λ 1.0, 3 epochs; checkpoint chosen by the `copy2` proxy among gate-passing evals):
+
+| Train size | Steps (chosen / total) | Bits/byte | τ | Proxy score | **J1 grounded** | J1 hallucination | Refusal recall | Over-refusal |
+|---|---|---|---|---|---|---|---|---|
+| 2K (7.7 pilot, 8 epochs) | 312 / 312 | +0.005 | 0.75 | +0.068 | 0.215 | 0.349 | 0.815 | 0.109 |
+| 5K | 291 / 291 | +0.006 | 0.50 | +0.126 | 0.273 | 0.327 | 0.823 | 0.105 |
+| 10K | 435 / 579 | +0.008 | 0.45 | +0.202 | 0.287 | 0.345 | 0.823 | 0.047 |
+| **20K** | 720 / 1,155 | +0.009 | 0.70 | **+0.339** | **0.349** | 0.309 | 0.871 | 0.018 |
+
+- Judged grounded accuracy rises about **+0.045 per doubling** of data (0.215 → 0.273 → 0.287 → 0.349).
+- At that rate, **0.60 would need roughly 5–6 more doublings** (on the order of 1M examples). Data
+  alone will not reach the target for this model.
+
+**Final test** (1,000 items, frozen and used once; 20K model, τ 0.7):
+
+| Metric | Target | **copy2 (serving)** | plain |
+|---|---|---|---|
+| Hallucination | ≤ 0.15 | **0.325** ❌ | 0.539 ❌ |
+| Refusal recall | ≥ 0.80 | **0.780** ❌ (just) | 0.780 ❌ |
+| Over-refusal (A) | ≤ 0.20 | **0.048** ✅ | 0.048 ✅ |
+| Grounded accuracy (J1) | ≥ 0.60 | **0.316** ❌ | 0.336 ❌ |
+| Citation accuracy | ≥ 0.80 | **0.903** ✅ | 0.899 ✅ |
+| Quote fidelity | ≥ 0.90 | **0.998** ✅ | 0.391 ❌ |
+| Format validity | ≥ 0.99 | **1.000** ✅ | 0.998 ✅ |
+| Paired consistency | reported | 0.273 (150 pairs) | 0.300 |
+| Decision AUROC (A vs B1+B2) | reported | 0.923 | |
+
+**Breakdowns** (`copy2`):
+- **Hallucination 0.325**, as shares of all test items:
+  - unsupported A answers 15.3%;
+  - unsupported C outputs 10.6%;
+  - answered near misses (B2) 4.4%;
+  - answered B1 2.2%;
+  - B3 0.
+- **Refusal recall:** B1 0.83–0.86, **B2 0.55–0.61**, B3 1.0. Near misses stay hard.
+- **No entity shortcut:** B1 refusal is about the same with and without the entity present (0.861 vs
+  0.833).
+- **Grounded accuracy:**
+  - by source: SEC 0.379, case law 0.305, web 0.188;
+  - by oracle position: 0.28 / 0.37 / 0.29 / 0.32 (a 9-point spread, under the 10-point limit).
+- **Teacher ceiling** (DeepSeek on 200 test items, J1-judged): grounded 1.00, hallucination 0.01,
+  recall 0.96. This is inflated by construction, but it shows the items are well-formed and
+  answerable: the gap is the student.
+
+**Forgetting:**
+- held-out bits/byte +0.0089 pooled (case law +0.009, SEC +0.007, web +0.011), within +0.02 ✅;
+- CaseHOLD PMI −4.8 points (reported, not gated, D-23; acc/acc_norm unchanged at 0.120/0.179).
+
+**Verdict.** Three of the seven gated targets missed:
+- grounded accuracy 0.316 vs 0.60;
+- hallucination 0.325 vs 0.15;
+- refusal recall 0.780 vs 0.80 (dev at the same τ: 0.871).
+
+Recorded, not lowered (§8.4). Data scaling helped steadily but slowly. The remaining gap is reading
+comprehension in a 125M model (the right passage is cited 90% of the time; the answer is right a
+third of the time).
+
+**Artifacts:** `/data/raft/runs/full/` holds `n5000.pt`, `n10000.pt`, `n20000.pt`, `hf/` (the 20K model,
+greedy config, `raft_format.json` with τ 0.7), `final.json`, `results.jsonl` and `log.txt`. Local copies
+of every generation and score are in `.smoke/raft/scale/`.

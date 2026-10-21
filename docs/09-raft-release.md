@@ -77,3 +77,25 @@ strip of metric cards; a passages + question playground; "what this is").
 
 ## Cost
 ≈ $0. Modal CPU only while someone uses the playground (scale-to-zero); HF and Vercel are free.
+
+## Results (2026-10-22): DONE, $0 incremental spend
+
+| Step | Result | Validation |
+|---|---|---|
+| 8.1 `raft_decode.py` | Decoding moved unchanged out of `eval_raft.py`, which re-imports it. Import-time asserts tie the constants to `config.py` / `model.py` | All decoding/sweep/eval checks pass. The released weights (bf16) on CPU match the H100 test generations on **24/24 decisions** and **19/24 texts verbatim** (the rest differ by bf16-vs-fp32 numerics) |
+| 8.2 HF `Deepanshu027/slm-125m-raft` | Public. HF export + `raft_decode.py` + `raft_stats.json` + model card built from artifacts by `publish_raft.py`. Weights SHA-256 `9f832f89…` | `publish_raft.py verify`: fresh Hub download, load, and the card's two asserted examples (cites passage 2 with a verbatim quote; refuses the near miss) |
+| 8.3 `POST /answer` | Same Modal app (`deepanshu-m23csai`), RAFT weights baked in from HF, lazy-loaded on the first call; memory 3 → 4 GiB | From the public URL: answer (passage 2, verbatim quote, correct) and refusal; CORS `*`; 422 for over-long input; first call 8.2 s (load), then ~2–5 s |
+| 8.4 Website `/grounded` | Hero with spec strip and live playground; 8 chapters (problem, format with a loss-mask toggle, five kinds, data funnel, forgetting curves, τ slider over 499 dev scores + copy decoding, learning curve, results/limits/cost); "Grounded QA" nav link. Every number from `site_data.py` → `site.json` `raft` | `next build` passes. Checked in a real browser at 1360 px and 390 px (no horizontal scroll), light and dark. Live deploy: 8 chapters render; the playground refuses the near-miss preset through the public API |
+
+**Found and fixed during the browser check:**
+- the stacked-bar legends printed percentages twice;
+- the τ histogram faded the wrong side and was unreadable on a linear scale (now square-root);
+- the τ slider wrapped;
+- the learning-curve ticks were thinned in a narrow card, and the memorisation bars had no room;
+- the loss-mask view hid the target below a scroll;
+- the cost labels were internal step numbers;
+- an earlier model-card example didn't reproduce (two short passages; the model cited the wrong one). It
+  was replaced with a 4-passage example whose real output, including one wrong answer, is printed in the card.
+
+**Still open:** the base model's HF card links the old API URL (`mdeepanshu2706--…`). Updating it is a
+separate Hub push, waiting for the user's yes.

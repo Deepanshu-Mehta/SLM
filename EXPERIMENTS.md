@@ -519,6 +519,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-26 | 10-21 | Serving/eval decoding = `copy2` (copy-constrained with forced scaffold, forced close, 240-char cap), τ = 0.75 for the pilot weights (7.8 re-picks τ by the same rule on its own dev). Recommendation: go to 7.8 | E-31: format 0.998 and quote fidelity 0.993; τ rule met. Data is the only evidenced lever, and it's cheap (≈ $0.25 per 1K) |
 | D-27 | 10-21 | (User) 7.8 at **20K** training examples; checkpoint selected by the dev proxy score under `copy2` among evals with bits/byte ≤ +0.02; learning curve 5K/10K/20K judged by J1 | E-32: the pilot memorises (train 0.95 vs dev 0.23), and content overfits from epoch 3 while decision-F1 rises; data ≈ $0.25 per 1K |
 | D-28 | 10-21 | Close Phase 7 with the 7.8 test numbers as the record (3 of 7 gated targets missed); the user approves Phase 8: publish the SFT model, a grounded API endpoint and a website section | E-35/E-36: the remaining gap is reading comprehension at 125M; neither more data (≈ +0.045 per doubling) nor decoding constraints close it cheaply |
+| D-29 | 10-22 | Phase 8 release: public HF repo `slm-125m-raft` (card and examples from artifacts, failures shown); `POST /answer` on the existing scale-to-zero Modal app; `/grounded` page on the existing site. One decoding implementation (`raft_decode.py`) everywhere | The user asked to publish and add the model to the site with a visual explanation. Serving what was evaluated, and showing the misses, keeps the claims honest |
 
 ## Corrections log
 

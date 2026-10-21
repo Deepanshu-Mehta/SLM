@@ -1,4 +1,6 @@
-"""Inference API for Deepanshu027/slm-125m-base, a 125M legal/financial base completer.
+"""Inference API for Deepanshu027/slm-125m-base, a 125M legal/financial base completer, and
+(POST /answer) Deepanshu027/slm-125m-raft, its grounded fine-tune: answer only from the given
+passages with a cited passage and a verbatim quote, or refuse (Phase 8, docs/09-raft-release.md).
 
 This is a *base* model: it continues text, it does not follow instructions. Every
 prompt is prefixed with <|eos|> (id 1), never <|bos|>: training documents always
@@ -24,6 +26,7 @@ from pydantic import BaseModel, Field
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/app/model"))
+RAFT_DIR = Path(os.environ.get("RAFT_DIR", "/app/model-raft"))
 EOS_ID, PAD_ID = 1, 2
 MAX_CONTEXT = 1024
 torch.set_num_threads(int(os.environ.get("TORCH_THREADS", "2")))
@@ -86,6 +89,25 @@ class ScoreRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000)
 
 
+class AnswerRequest(BaseModel):
+    passages: list[str] = Field(..., max_length=4, description="0-4 passages (~160 tokens each in training)")
+    question: str = Field(..., min_length=1, max_length=600)
+    copy_constrained: bool = Field(True, description="keep the quote a verbatim span of the cited passage")
+    tau: float = Field(0.7, ge=0.05, le=0.95, description="refuse iff s = P(none)/(P(none)+P(Pass)) >= tau")
+
+
+_raft: dict[str, Any] = {}
+
+
+def raft_model() -> tuple[Any, Any, Any]:
+    """Loaded on the first /answer call, so the base model's cold start is unchanged."""
+    if not _raft:
+        import raft_decode
+        _raft.update(rd=raft_decode, tok=AutoTokenizer.from_pretrained(RAFT_DIR),
+                     net=AutoModelForCausalLM.from_pretrained(RAFT_DIR, torch_dtype=torch.float32).eval())
+    return _raft["rd"], _raft["tok"], _raft["net"]
+
+
 def encode_prompt(prompt: str, max_new_tokens: int) -> torch.Tensor:
     """<|eos|> + prompt, trimmed from the left so prompt + output fit the context."""
     ids = tokenizer.encode(prompt, add_special_tokens=False)
@@ -119,7 +141,8 @@ def health() -> dict[str, str]:
 @app.get("/")
 def root() -> dict[str, Any]:
     return {"model": STATS["model"]["repo"], "docs": "/docs",
-            "endpoints": ["/info", "/generate", "/generate/stream", "/score", "/health"]}
+            "grounded_model": "Deepanshu027/slm-125m-raft",
+            "endpoints": ["/info", "/generate", "/generate/stream", "/score", "/answer", "/health"]}
 
 
 @app.get("/info")
@@ -201,3 +224,23 @@ def score(req: ScoreRequest) -> dict[str, Any]:
         "tokens": [{"token": tokenizer.decode([t]), "nll": round(float(n), 3),
                     "prob": round(math.exp(-float(n)), 4)} for t, n in zip(targets.tolist(), nll)],
     }
+
+
+@app.post("/answer")
+def answer(req: AnswerRequest) -> JSONResponse:
+    """Grounded answer from SLM-125M-RAFT: a cited passage, a verbatim quote and an answer, or a refusal."""
+    passages = [p.strip() for p in req.passages if p.strip()]
+    if any(len(p) > 2000 for p in passages):
+        return JSONResponse({"detail": "each passage must be at most 2,000 characters"}, status_code=422)
+    with LOCK:
+        rd, tok, net = raft_model()
+        n_prompt = len(tok.encode(rd.format_prompt(passages, req.question.strip()), add_special_tokens=False))
+        if n_prompt + rd.MAX_NEW_TOKENS > MAX_CONTEXT:
+            return JSONResponse({"detail": f"passages + question are {n_prompt} tokens; the limit is "
+                                           f"{MAX_CONTEXT - rd.MAX_NEW_TOKENS} (1,024 context minus the answer)"},
+                                status_code=422)
+        t0 = time.time()
+        with torch.no_grad():
+            out = rd.answer(net, tok, passages, req.question.strip(), tau=req.tau, copy=req.copy_constrained)
+    return JSONResponse({**out, "tau": req.tau, "copy_constrained": req.copy_constrained,
+                         "prompt_tokens": n_prompt, "elapsed_ms": round((time.time() - t0) * 1000)})

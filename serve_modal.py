@@ -20,21 +20,25 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("torch==2.5.1", index_url="https://download.pytorch.org/whl/cpu")
     .pip_install_from_requirements("serve/requirements.txt")
-    .env({"MODEL_DIR": "/model", "TORCH_THREADS": "4", "TOKENIZERS_PARALLELISM": "false",
+    .env({"MODEL_DIR": "/model", "RAFT_DIR": "/model-raft", "TORCH_THREADS": "4", "TOKENIZERS_PARALLELISM": "false",
           "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
     # Weights baked in from the public model repo: one canonical copy, no download on cold start.
     .run_commands(
         "python -c \"from huggingface_hub import snapshot_download; "
         f"snapshot_download('{config.HF_REPO}', local_dir='/model', "
+        "allow_patterns=['*.json', '*.safetensors'])\"",
+        # Phase 8: the grounded fine-tune for POST /answer (docs/09-raft-release.md)
+        "python -c \"from huggingface_hub import snapshot_download; "
+        f"snapshot_download('{config.HF_RAFT_REPO}', local_dir='/model-raft', "
         "allow_patterns=['*.json', '*.safetensors'])\"")
     .add_local_file("serve/app.py", "/root/slm_api.py")
-    .add_local_python_source("config")  # serve_modal.py itself imports config in the container
+    .add_local_python_source("config", "raft_decode")  # config: serve_modal.py imports it; raft_decode: /answer
 )
 
 app = modal.App(f"{config.PROJECT}-serve")
 
 
-@app.function(image=image, cpu=2.0, memory=3072, min_containers=0, max_containers=1,
+@app.function(image=image, cpu=2.0, memory=4096, min_containers=0, max_containers=1,
               scaledown_window=SCALEDOWN_S, timeout=300)
 @modal.concurrent(max_inputs=16)
 @modal.asgi_app()

@@ -1516,3 +1516,35 @@ format-failure diagnosis, and a go/no-go input for 7.8.
 **Go/no-go input for 7.8:** go. More data is the only lever left with clear evidence behind it,
 and it's cheap. Expect the decision, format and quote targets to hold, and grounded accuracy and
 hallucination to miss at 10K. 7.8's own learning curve then decides any top-up (§3.1).
+
+### Review of 7.0–7.7 before 7.8 (2026-10-21, $0)
+Asked by the user: any mistakes, start 7.8 or correct first, add more data?
+
+**Checks run** (all $0):
+1. **Dev target loss per epoch** (7.7a): 0.504, **0.482**, 0.511, 0.539, 0.573, 0.577, 0.585, 0.592. It is
+   lowest at epoch 2, then rises every epoch, while decision macro-F1 keeps improving until epochs 6–8.
+2. **The 7.7a weights on 40 of their own training A items** (local CPU, copy decoding, τ 0.75): proxy
+   grounded **0.95** (38/40), cites the oracle 40/40, 0 refusals. On dev: 0.23 and 78%.
+3. **J1 spot-check:** 15 verdicts read against the oracle passages (8 wrong A, 3 right A, 4 unsupported C).
+   All 15 agree with my reading. The model's answers are really wrong: wrong span, a changed fact
+   (Sunday vs Saturday), names from another passage.
+
+**Findings and mistakes.**
+- **The pilot memorises; it doesn't generalise.** 2,000 examples × 8 epochs. Answer content is
+  overfitted from epoch 3 onward. The low dev grounded accuracy is a generalisation gap, not a
+  capacity or format limit. That's the clearest evidence so far that **more unique data** is the lever.
+- **Mistake: checkpoint selection ignores answer content (C-14).** The plan (§7.1) keeps the best
+  decision-F1 epoch, and D-23's "final epoch" was my proposal. Both select on the answer/refuse
+  decision only, so they pick an epoch where the content is overfitted.
+  - **Fix for 7.8:** select by the dev **proxy selection score under `copy2` decoding**. Under copy
+    decoding it tracked J1 closely (55/8/4/178 on A, E-31), and it covers both content and decisions.
+  - Evaluate it several times per epoch, with bits/byte as the gate.
+- **Mistake: my 10K projection (0.30–0.45) was unfounded (C-14).** It extrapolated the 7.6 curve, which
+  was measured with plain decoding. Under plain decoding the proxy mostly measured invented quotes
+  (it understates J1 ~4× there). There is no judged learning curve yet, so I retract the number. 7.8
+  must measure one.
+- **No other mistakes found.**
+  - The J1 scoring was hand-tested and spot-checked.
+  - The τ rule was applied as pre-registered.
+  - The test set is untouched.
+  - The bits/byte guard was reproduced three times.

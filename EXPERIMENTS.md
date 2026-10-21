@@ -443,6 +443,12 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **The proxy matches J1 under copy decoding** (55/8/4/178).
 - **Projection:** 10K → grounded accuracy ≈ 0.30–0.45, so the 0.60 target likely missed.
 
+### E-32 · Review before 7.8: the pilot memorises (2026-10-21, $0)
+- **7.7a dev target loss** bottoms at epoch 2 (0.482) and rises to 0.592 by epoch 8; decision macro-F1 peaks late.
+- **On 40 of its own training A items:** proxy grounded **0.95** and oracle citation 40/40, versus 0.23 and 78% on dev.
+  This is a generalisation gap, so more unique data is the lever.
+- **J1 spot-check:** 15/15 verdicts agree with a manual reading.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -491,3 +497,4 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | C-11 | Trial 7.3 first scoring: Gemini ≥ 10 points better as writer; checker agreement 82.4% | DeepSeek 64.0% vs Gemini 71.4% (keep DeepSeek); agreement 90.0% | `answers_agree` used token-F1. 55 of 60 "disagreements" had the same passage and quote with a verbose answer (E-22) |
 | C-12 | 7.6b rule: forgetting grows with steps, so extrapolate the per-epoch bits/byte linearly to 7.8's 579 steps | Forgetting peaks at epochs 2–3 and recovers as the cosine LR anneals; the linear fit extrapolated the recovery | The rule was written before seeing any per-epoch data. Its pick isn't adopted; measured end-of-run numbers are used (E-28) |
 | C-13 | 7.7 is "$0" (PROJECT_STATE and two messages, 10-18/10-21) | 7.7 includes the J1 judge on the pilot candidate (≈ $0.50 for both decodings) plus a ≈ $0.45 GPU retrain | I misread the plan's step table (§5 says ≈ $0.40); caught in the review before 7.7 |
+| C-14 | (a) Keep the best-decision-F1 / final epoch (§7.1, D-23); (b) 10K → grounded 0.30–0.45 (E-31) | (a) Select on the dev proxy score under `copy2` (content + decisions); (b) no judged learning curve exists yet, so no projection | (a) Answer content overfits from epoch 3 while decision-F1 still rises (E-32). (b) The projection used the plain-decoding proxy, which measured invented quotes |

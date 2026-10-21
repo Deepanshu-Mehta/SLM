@@ -444,6 +444,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-19 | 10-16 | After the 7.3 trial: DeepSeek stays the writer; DeepSeek checks run **without thinking** (`TEACHER.think_on_refusal_checks = False`); answer agreement is symmetric containment | Pre-registered rules (E-22). Thinking's extra rejections were mostly "ambiguous" flags, and Gemini sided with thinking-off on 10 of 16 |
 | D-20 | 10-16 | Dev/test near misses must pass a manual read under the sharpened rule (drop if stated/computable/partial/underspecified; keep different-item hard negatives); dev accepts a 1-item B2 shortfall rather than lowering the bar | E-25. The user chose the $0 full read over accepting ~5–10% noise in the numbers that define results |
 | D-21 | 10-17 | Pilot selection LR 2e-4 / refusal 35% (pre-registered rule: best selection score). Report every proxy and the final test under **both** plain and copy-constrained decoding; recommend copy-constrained for serving. τ 0.7 is provisional until 7.7 | E-27: copying is the dominant failure (score −0.550 → −0.137 on 80 dev items, decisions unchanged); the constraint costs nothing at training time |
+| D-22 | 10-21 | Move Modal work to the new account `deepanshu-m23csai` (user's instruction); copy the Volume volume to volume inside Modal (`migrate_app.py`, one worker per file), skipping `clean/` and `checkpoints/calibration/` | The old account's credits are ending. A Modal-side copy avoids routing 16 GiB through the laptop. 184/184 files verified by size, weights by SHA-256 |
 
 ## Corrections log
 

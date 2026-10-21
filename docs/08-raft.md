@@ -1650,3 +1650,28 @@ Phase 7 would end at ≈ $14.4.
   - **Result:** 16,700 sources (case law 6,680, SEC 6,680 from 1,757 filings, web 3,340); 0 overlap
     with trial/pilot passages, 0 duplicates.
 - **Generation started 13:50 UTC** (off-peak), DeepSeek, 32 workers, ≈ $0.00014 per call.
+- **Generation done 16:31 UTC:** 16,696 of 16,700 calls OK, $1.77, 0 peak-hour calls.
+- **Mechanical checks:** 22,192 candidates (A 11,403 / B1 4,400 / B2 2,840 / C 3,549). G1 drops: copied
+  passage words 3,983, vague reference 2,205.
+- **Assembly:** 22,142 contexts, $0.017.
+- **V3 near-miss check:**
+  - keeps 85.8% of scale B2 (2,433 of 2,835);
+  - rejects 12 of the pilot's 210 train B2 (5.7%, matching E-25's ~5% estimate);
+  - sampled rejections are correct (another passage really answers the question).
+- **V1/V2:** 20,971 checks, 0 failures. Stage spend $5.07.
+- **Selection, first pass: the safety stop fired** (265 shared documents). This is **not a dev/test
+  leak: all 265 are probe documents (E-34).**
+  - The probe is built from train-split documents, and source exclusion was by passage, not
+    document, so other passages of probe documents entered training.
+  - 2,318 rows touch a probe document, mostly as BM25 distractors. Those get no gradient (the loss
+    covers only the target).
+  - **562 A/C rows quote a probe document in their target** (57 of them pilot rows). Those
+    contaminate the probe, so they are excluded and replaced from spare accepted rows.
+  - The check now separates dev/test overlap (hard stop) from probe-cited overlap (hard stop) and
+    probe-as-context (reported).
+- **Selection, final: 20,340 train rows.**
+  - Buckets: A 9,600 / B1 4,222 / B2 2,198 / B3 720 / C 3,600. Every bucket covers
+    `select_mix(20,000, 0.35)`.
+  - Overlap: dev/test documents 0; probe documents cited 0; probe documents as context only 257.
+  - `rule_or_holding` is 8.8% of A (pilot 6%).
+  - Max 809 tokens.

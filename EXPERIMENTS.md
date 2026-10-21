@@ -454,6 +454,13 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - Fix: up to 4 passages per SEC filing, which gives 6,680 from 1,757 filings. The mix stays 40/40/20,
   with 0 overlap with trial/pilot sources.
 
+### E-34 · 7.8 selection: probe documents in the training data (2026-10-21)
+- **Cause.** Source exclusion was by passage, so other passages of the probe's train documents entered
+  training: as BM25 distractors (no gradient) and in 562 A/C targets (57 pilot).
+- **Fix.** Rows whose cited passage comes from a probe document are excluded and replaced. 0 probe documents
+  are cited, 0 dev/test documents are used. The 7.7 pilot model also trained on 57 such rows; its probe was
+  never evaluated.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

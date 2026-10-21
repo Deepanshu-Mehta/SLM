@@ -642,13 +642,26 @@ def cmd_select_scale(args) -> None:
     tok = AutoTokenizer.from_pretrained(".smoke/final/base")
     rows, V = jsonl(st / "assembled.jsonl"), _verdicts(st)
     rng = random.Random(config.RAFT.seed)
-    acc = [r for r in rows if accepted(r, V)]
+    dk = lambda pid: pid.rsplit("/", 1)[0]
+    probe_docs = {dk(p) for r in jsonl(PILOT_DATASETS / "probe.jsonl") for p in (r.get("pids") or [])}
+
+    def cites_probe(r: dict) -> bool:     # E-34: the loss covers the target, which quotes the cited passage
+        return (r["bucket"] in ("A", "C") and bool(r.get("k")) and bool(r.get("pids"))
+                and dk(r["pids"][int(r["k"]) - 1]) in probe_docs)
+
+    acc = [r for r in rows if accepted(r, V) and not cites_probe(r)]
     by = defaultdict(list)
     for r in acc:
         by[r["bucket"]].append(r)
     for b in by:
         rng.shuffle(by[b])
-    q = SCALE_QUOTAS["train"]
+    pilot = jsonl(PILOT_DATASETS / "train.jsonl")
+    v3_drop = [r["id"] for r in pilot if r["bucket"] == "B2" and not v3_ok(V["ds_v3"].get(r["id"]))]
+    probe_drop = [r["id"] for r in pilot if cites_probe(r)]
+    gone = set(v3_drop) | set(probe_drop)
+    pilot_kept = [r for r in pilot if r["id"] not in gone]
+    lost = Counter(r["bucket"] for r in pilot if r["id"] in set(probe_drop))
+    q = {b: n + lost[b] for b, n in SCALE_QUOTAS["train"].items()}     # replace pilot rows dropped for the probe
     others = defaultdict(list)
     for r in jsonl(st / "sources.jsonl"):
         others[r["source"]].append(r)
@@ -656,14 +669,11 @@ def cmd_select_scale(args) -> None:
     b3 = make_b3(by["A"][q["A"]:] + a_sel, q["B3"], others, tok, rng)
     chosen = a_sel + by["B1"][:q["B1"]] + by["B2"][:q["B2"]] + by["C"][:q["C"]] + b3
     got = Counter(r["bucket"] for r in chosen)
-    pilot = jsonl(PILOT_DATASETS / "train.jsonl")
-    v3_drop = [r["id"] for r in pilot if r["bucket"] == "B2" and not v3_ok(V["ds_v3"].get(r["id"]))]
-    pilot_kept = [r for r in pilot if r["id"] not in set(v3_drop)]
     train = pilot_kept + [dataset_record(r, "train") for r in chosen]
     rng.shuffle(train)
-    devtest_docs = {pid.rsplit("/", 1)[0] for g in ("dev", "test", "probe")
-                    for r in jsonl(PILOT_DATASETS / f"{g}.jsonl") for pid in (r.get("pids") or [])}
-    train_docs = {pid.rsplit("/", 1)[0] for r in train for pid in (r.get("pids") or [])}
+    devtest_docs = {dk(pid) for g in ("dev", "test") for r in jsonl(PILOT_DATASETS / f"{g}.jsonl")
+                    for pid in (r.get("pids") or [])}
+    train_docs = {dk(pid) for r in train for pid in (r.get("pids") or [])}
     out_dir = st / "datasets"
     out_dir.mkdir(exist_ok=True)
     write_jsonl(out_dir / "train.jsonl", train)
@@ -674,20 +684,24 @@ def cmd_select_scale(args) -> None:
     rep = {"accepted": {b: len(v) for b, v in by.items()},
            "assembled": dict(Counter(r["bucket"] for r in rows)),
            "scale_selected": dict(got), "shortfall": {b: n - got[b] for b, n in q.items() if got[b] < n},
-           "pilot_b2_v3_dropped": len(v3_drop), "pilot_rows_kept": len(pilot_kept),
+           "pilot_b2_v3_dropped": len(v3_drop), "pilot_probe_cited_dropped": len(probe_drop),
+           "pilot_rows_kept": len(pilot_kept), "quotas_used": q,
+           "scale_probe_cited_excluded": sum(1 for r in rows if accepted(r, V) and cites_probe(r)),
            "train_total": len(train), "train_buckets": dict(Counter(r["bucket"] for r in train)),
            "train_sources": dict(Counter(r["source"] for r in train)),
            "a_types": dict(Counter(r.get("type") for r in train if r["bucket"] == "A")),
            "tokens_max": max(r["n_tokens"] for r in train),
            "doc_overlap_with_devtest": len(train_docs & devtest_docs),
+           "probe_docs_cited_in_train": sum(cites_probe(r) for r in train),
+           "probe_docs_as_context_only": len(train_docs & probe_docs),
            "v3_on_scale_b2": {"checked": sum(1 for r in rows if r["bucket"] == "B2" and r["cid"] in V["ds_v3"]),
                               "pass": sum(1 for r in rows if r["bucket"] == "B2" and v3_ok(V["ds_v3"].get(r["cid"])))},
            "spend": {"api_usd": lg["spent_usd"], "modal_usd": round(sum(mc.values()), 4), "cap_usd": lg["cap_usd"]},
            "funnel": json.loads((st / "funnel.json").read_text())}
     (st / "select_report.json").write_text(json.dumps(rep, indent=2))
     print(json.dumps({k: v for k, v in rep.items() if k != "funnel"}, indent=1))
-    if rep["doc_overlap_with_devtest"]:
-        raise SystemExit("train shares documents with dev/test: stop")
+    if rep["doc_overlap_with_devtest"] or rep["probe_docs_cited_in_train"]:
+        raise SystemExit("train shares documents with dev/test, or quotes a probe document: stop")
 
 
 def audit_rows() -> list[dict]:

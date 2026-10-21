@@ -1449,3 +1449,70 @@ format-failure diagnosis, and a go/no-go input for 7.8.
 - 7.7a reproduces 7.6c's final-epoch dev macro-F1 within ±0.03 and bits/byte within ±0.003.
 - Every judged item has a J1 verdict (failures retried once).
 - Spend stays within caps; 0 containers afterwards.
+
+### 7.7 Pilot evaluation: DONE (2026-10-21; GPU $0.38, J1 $0.227; 7.7 total ≈ $0.61)
+**7.7a** (1 × H100, $0.32, 0 containers afterwards). LR 5e-5, λ 1.0, n 2,000, refusal 35%, final epoch (312).
+
+| Validation | 7.7a | Reference | |
+|---|---|---|---|
+| Dev macro-F1 | 0.842 | 7.6c 0.841 | ✅ within ±0.03 |
+| Bits/byte change | +0.0052 | 7.6c +0.0051 | ✅ within ±0.003 |
+| CaseHOLD PMI | −5.0 points | — | reported (D-23) |
+
+- **τ rule → 0.75** meets both targets: over-refusal(A) 0.105, recall(B) 0.815, macro-F1 0.863.
+
+**Format fix** (free code; regeneration on 1 × L40S, $0.063).
+- **What I found.** I read all 17 copy-mode format failures. The fixes:
+  - force the `\nAnswer:` scaffold after the closing quote (the tokenizer has no `"\n` token);
+  - force the close instead of letting go when nothing continues the copy;
+  - cap the quote at 240 characters (train quotes: p99 222).
+  - An empty quote counts as non-verbatim.
+  - 5 new unit tests.
+- **Effect (`copy2`):**
+  - format 0.966 → **0.998**;
+  - quote fidelity 0.841 → **0.993**.
+  - One A decision flipped (over-refusal 0.105 → 0.109), from L40S vs H100 numerics near τ.
+
+**7.7b J1** (Gemini batch).
+- 753 calls, 0 failures, $0.227 (stage cap $1).
+- 405 `copy2` outputs identical to `copy` reused their verdicts.
+
+**Headline metrics on dev** (499 items; targets from §8.1):
+
+| Metric | Target | plain | copy | **copy2 (serving)** |
+|---|---|---|---|---|
+| Hallucination | ≤ 0.15 | 0.645 | 0.405 | **0.349** ❌ |
+| Refusal recall | ≥ 0.80 | 0.815 | 0.815 | **0.815** ✅ |
+| Over-refusal (A) | ≤ 0.20 | 0.105 | 0.105 | **0.109** ✅ |
+| Grounded accuracy (J1) | ≥ 0.60 | 0.218 | 0.211 | **0.215** ❌ |
+| Citation accuracy | ≥ 0.80 | 0.760 | 0.752 | **0.780** ❌ (close) |
+| Quote fidelity | ≥ 0.90 | 0.151 | 0.841 | **0.993** ✅ |
+| Format validity | ≥ 0.99 | 0.976 | 0.966 | **0.998** ✅ |
+| Paired consistency | reported | 0.213 | 0.187 | 0.173 |
+
+**Where the misses come from** (`copy2`):
+- **Grounded accuracy.**
+  - The model cites the oracle passage on 191 of 245 answered A items (78%).
+  - Of those 191, J1 marks only 59 correct (31%). **Reading comprehension within the passage is the
+    bottleneck**, not passage selection or format.
+  - Typical errors: a short or wrong quote ("The", "State", "the DPUC"), then a wrong span or an
+    invented value ("10.63 percent" for "67 percent"; "Yes" for "No").
+- **Hallucination = 0.349.** It is made of three parts, as shares of all 499 dev items:
+  - answered unanswerable items: 23 (4.6%);
+  - unsupported A answers: 86 (17.2%);
+  - **unsupported C outputs: 63 of 100 grounded tasks** (12.6%; summaries and lists add content).
+  - The answer/refuse decision is fine. The content after "Passage k" isn't.
+- **Proxy vs J1** agree closely under copy decoding: 55 both-correct, 8 proxy-only, 4 J1-only, 178
+  both-wrong. The proxy was not overly strict. Under plain decoding the proxy understates (49 J1-only)
+  because invented quotes fail it while the answers are right.
+
+**Projection to 10K.**
+- There is one judged point (2K); the 7.6 curve (500/1K/2K) was still rising roughly ×2 per doubling.
+- A plausible 10K range for grounded accuracy is **0.30–0.45**, so the 0.60 target will most likely
+  still be missed at 10K.
+- Hallucination should fall with it but stays well above 0.15 while C outputs are this unsupported.
+- **Data is cheap at measured rates:** 10K ≈ $2.50; each extra 1,000 kept examples ≈ $0.25.
+
+**Go/no-go input for 7.8:** go. More data is the only lever left with clear evidence behind it,
+and it's cheap. Expect the decision, format and quote targets to hold, and grounded accuracy and
+hallucination to miss at 10K. 7.8's own learning curve then decides any top-up (§3.1).

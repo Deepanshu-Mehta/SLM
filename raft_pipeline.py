@@ -587,7 +587,7 @@ def cmd_upload(args) -> None:
 
 # --------------------------------------------------------------------------- 7.7 J1
 EVAL_DIR = LOCAL / "pilot" / "eval"
-MODES = ("plain", "copy")
+MODES = ("plain", "copy", "copy2")        # copy2: the 7.7 format-fixed CopyConstraint (optional file)
 
 
 def _parsed(gen: dict) -> dict:
@@ -636,8 +636,8 @@ def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict
         v = verdicts.get(f"{g['id']}|{mode}") or {}
         ok_parse = p["valid"] and not p["refusal"]
         k_ok = ok_parse and p["k"] and 1 <= p["k"] <= len(r["passages"] or [])
-        has_quote = ok_parse and p["quote"] is not None
-        verbatim = bool(has_quote and k_ok and p["quote"] in r["passages"][p["k"] - 1])
+        has_quote = ok_parse and p["quote"] is not None      # an empty quote counts as a non-verbatim quote
+        verbatim = bool(has_quote and p["quote"] and k_ok and p["quote"] in r["passages"][p["k"] - 1])
         if has_quote:
             c["quoted"] += 1
             c["verbatim"] += verbatim
@@ -671,17 +671,23 @@ def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict
 
 def _eval_inputs() -> tuple[dict[str, dict], dict[str, list[dict]]]:
     rows = {r["id"]: r for r in jsonl(LOCAL / "pilot" / "datasets" / "dev.jsonl")}
-    gens = {m: jsonl(EVAL_DIR / f"dev_gen_{m}.jsonl") for m in MODES}
-    if not all(gens.values()):
+    gens = {m: jsonl(EVAL_DIR / f"dev_gen_{m}.jsonl") for m in MODES if (EVAL_DIR / f"dev_gen_{m}.jsonl").exists()}
+    if not (gens.get("plain") and gens.get("copy")):
         raise SystemExit(f"missing generations in {EVAL_DIR}: run raft_gpu_app.py::pilot_eval_check first")
     return rows, gens
+
+
+def _reused(gens: dict[str, list[dict]]) -> dict[str, str]:
+    """copy2 outputs whose text equals the copy output: '{id}|copy2' -> '{id}|copy' (not re-judged)."""
+    old = {g["id"]: g["text"] for g in gens.get("copy", [])}
+    return {f"{g['id']}|copy2": f"{g['id']}|copy" for g in gens.get("copy2", []) if old.get(g["id"]) == g["text"]}
 
 
 def cmd_judge(args) -> None:
     need_confirm(args, "J1 judging (Gemini)")
     st, lg = sdir(args.stage), ledger(args.stage)
     rows, gens = _eval_inputs()
-    jobs = judge_jobs(rows, gens)
+    jobs = [j for j in judge_jobs(rows, gens) if j.key not in _reused(gens)]
     out = st / "j1.jsonl"
     gb = GeminiBatch(lg)
     for i in range(0, len(jobs), GEMINI_CHUNK):
@@ -700,14 +706,17 @@ def cmd_judge(args) -> None:
 def cmd_score(args) -> None:
     rows, gens = _eval_inputs()
     verdicts = {r["key"]: r["json"] for r in jsonl(sdir(args.stage) / "j1.jsonl") if r["ok"]}
+    for k2, k1 in _reused(gens).items():                  # identical copy2 text: same verdict
+        if k1 in verdicts:
+            verdicts[k2] = verdicts[k1]
     judged = {j.key for j in judge_jobs(rows, gens)}
     print(f"J1 verdicts for {len(judged & set(verdicts))} of {len(judged)} judged outputs")
-    rep = {m: score_eval(rows, gens[m], verdicts, m) for m in MODES}
+    rep = {m: score_eval(rows, gens[m], verdicts, m) for m in gens}
     (sdir(args.stage) / "headline.json").write_text(json.dumps(rep, indent=2))
     targets = {"hallucination": ("<=", 0.15), "refusal_recall": (">=", 0.80), "over_refusal_A": ("<=", 0.20),
                "grounded_accuracy": (">=", 0.60), "citation_accuracy": (">=", 0.80),
                "quote_fidelity": (">=", 0.90), "format_validity": (">=", 0.99)}
-    for m in MODES:
+    for m in gens:
         print(f"[{m}]")
         for k, (op, t) in targets.items():
             v = rep[m][k]

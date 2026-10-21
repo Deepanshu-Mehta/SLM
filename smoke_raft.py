@@ -673,9 +673,56 @@ def eval_checks() -> None:
             "citation_accuracy": 1.0, "quote_fidelity": 1.0, "format_validity": 1.0, "paired_consistency": 1.0}
     check("§8.1 scoring matches the hand-computed values", all(abs(m[k] - x) < 1e-9 for k, x in want.items()),
           str({k: round(m[k], 3) for k in want}))
+    copy_constraint_checks()
     m2 = RP.score_eval(rows, gens, {}, "copy")
     check("a missing J1 verdict counts against the model", m2["grounded_accuracy"] == 0.0 and m2["hallucination"] == 0.6,
           str({k: m2[k] for k in ("grounded_accuracy", "hallucination")}))
+
+def copy_constraint_checks() -> None:
+    """CopyConstraint (7.7 format fixes) on the real tokenizer with synthetic logits."""
+    import torch
+    from transformers import AutoTokenizer
+
+    import eval_raft as E
+
+    tok = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
+    vocab = [tok.decode([i]) for i in range(len(tok))]
+    src = "Acme Corp reported revenue of $5 million in 1990, up from $4 million in 1989."
+    W = 4                                                   # fake prompt width
+
+    def step(text: str, scores: torch.Tensor, cc: E.CopyConstraint) -> int:
+        ids = torch.tensor([[2] * W + tok.encode(text)])
+        return int(cc(ids, scores.clone()[None])[0].argmax())
+
+    cc = E.CopyConstraint(tok, W, [[src]], vocab)
+    g = torch.Generator().manual_seed(0)
+    tails = ("", "\n", "\nAn", "\nAnsw")
+    nxt = [vocab[step(' Passage 1\nQuote: "revenue of $5 million"' + t, torch.randn(len(vocab), generator=g), cc)]
+           for t in tails]
+    check("copy: after the closing quote the `\\nAnswer:` scaffold is forced",
+          all("\nAnswer:".startswith(t + x) for t, x in zip(tails, nxt)), str(nxt))
+    junk = torch.full((len(vocab),), -5.0)
+    junk[tok.encode(" zebra")[0]] = 10.0                    # the model only wants a token not in the passage
+    cc2 = E.CopyConstraint(tok, W, [[src]], vocab, top=1)
+    check("copy: when nothing continues the copy, the quote is closed (not released)",
+          vocab[step(' Passage 1\nQuote: "revenue', junk, cc2)] == '"' and cc2.fallbacks == 1)
+    first = vocab[step(' Passage 1\nQuote: "', junk, cc2)]
+    check("copy: an empty quote must start with passage text, never close at once",
+          first != '"' and first in src, repr(first))
+    cc3 = E.CopyConstraint(tok, W, [[src]], vocab, max_quote_chars=10)
+    check("copy: at the character cap only the close is allowed",
+          vocab[step(' Passage 1\nQuote: "Acme Corp re', torch.randn(len(vocab), generator=g), cc3)] == '"')
+    ok = 0
+    for seed in range(5):                                  # random walks always end in a parseable answer
+        gg, text = torch.Generator().manual_seed(seed), ' Passage 1\nQuote: "'
+        cc4 = E.CopyConstraint(tok, W, [[src]], vocab, max_quote_chars=40)
+        for _ in range(60):
+            text += vocab[step(text, torch.randn(len(vocab), generator=gg), cc4)]
+            if "\nAnswer:" in text:
+                break
+        p = E.parse_output(text + " x")
+        ok += bool(p["valid"] and p["quote"] and p["quote"] in src)
+    check("copy: 5 random-logit walks all yield a valid, verbatim, closed quote", ok == 5, f"{ok}/5")
 
 if __name__ == "__main__":
     main()

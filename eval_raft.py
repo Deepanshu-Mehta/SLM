@@ -85,14 +85,31 @@ _QUOTE_OPEN = re.compile(r'^ Passage (\d)\nQuote: "(.*)$', re.S)
 
 class CopyConstraint(LogitsProcessor):
     """Copy-constrained quoting: while generation is inside `Quote: "...`, only tokens that keep
-    the quote an exact substring of the cited passage (or that close the quote) are allowed.
-    The answer/refuse decision is untouched; tokens are ranked by the model, best first."""
+    the quote an exact substring of the cited passage (or the closing `"`) are allowed; once the
+    quote is closed, the `\nAnswer:` scaffold is forced. The answer/refuse decision is untouched;
+    tokens are ranked by the model, best first.
+
+    7.7 format fixes (dev format validity 0.966; 17 failures read):
+    - a bare `"` closed the quote and the model wrote on instead of `\nAnswer:` (10 of 17): the
+      scaffold is now forced after the close (the tokenizer has no `"\n` token);
+    - when no top candidate continued the copy, the constraint let go and the model looped until
+      max_new_tokens (4): it now forces the close instead;
+    - a 300-char quote plus the answer overflowed 128 tokens (3): cap 240 chars (train quotes:
+      p99 222, max 260)."""
+
+    SCAFFOLD = "\nAnswer:"
 
     def __init__(self, tok, prompt_width: int, passages: list[list[str]], vocab: list[str], top: int = 256,
-                 max_quote_chars: int = 300):
+                 max_quote_chars: int = 240):
         self.tok, self.width, self.passages, self.vocab, self.top = tok, prompt_width, passages, vocab, top
-        self.max_quote_chars = max_quote_chars        # ~40 words, the target spec; then force the close
-        self.fallbacks = 0
+        self.max_quote_chars = max_quote_chars
+        self.close_id = vocab.index('"')
+        self.fallbacks = 0                         # forced closes: nothing continued the copy
+
+    def _restrict(self, scores: torch.FloatTensor, b: int, allowed: list[int]) -> None:
+        keep = scores[b, allowed].clone()
+        scores[b] = -math.inf
+        scores[b, allowed] = keep
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if input_ids.shape[1] - self.width < 3:
@@ -100,26 +117,34 @@ class CopyConstraint(LogitsProcessor):
         for b in range(scores.shape[0]):
             text = self.tok.decode(input_ids[b, self.width:].tolist(), skip_special_tokens=True)
             m = _QUOTE_OPEN.match(text)
-            if not m or '"' in m.group(2):
+            if not m:
                 continue
-            k, q = int(m.group(1)), m.group(2)
+            k, rest = int(m.group(1)), m.group(2)
+            if '"' in rest:                        # closed: force the `\nAnswer:` scaffold
+                tail = rest.split('"', 1)[1]
+                if tail.startswith(self.SCAFFOLD) or not self.SCAFFOLD.startswith(tail):
+                    continue
+                need = self.SCAFFOLD[len(tail):]
+                allowed = [i for i, t in enumerate(self.vocab) if t and need.startswith(t)]
+                self._restrict(scores, b, allowed)
+                continue
             ps = self.passages[b]
             if not 1 <= k <= len(ps):
                 continue
-            src = ps[k - 1]
-            allowed = []
+            q, src = rest, ps[k - 1]
             must_close = len(q) >= self.max_quote_chars
+            allowed = []
             for i in torch.topk(scores[b], self.top).indices.tolist():
                 t = self.vocab[i]
-                closes = (t == '"' or t.startswith('"\n')) and q and q in src   # keep `"\nAnswer:` intact
-                if closes or (not must_close and t and not t.startswith('"') and (q + t) in src):
+                if (i == self.close_id and q and q in src) or \
+                        (not must_close and t and '"' not in t and (q + t) in src):
                     allowed.append(i)
-            if not allowed:                       # nothing in the top candidates continues the copy
+            if not allowed and not q:              # empty quote: any token that starts a span of the passage
+                allowed = [i for i, t in enumerate(self.vocab) if t and '"' not in t and t in src]
+            if not allowed:                        # nothing continues the copy: close it
                 self.fallbacks += 1
-                continue
-            keep = scores[b, allowed].clone()
-            scores[b] = -math.inf
-            scores[b, allowed] = keep
+                allowed = [self.close_id]
+            self._restrict(scores, b, allowed)
         return scores
 
 
@@ -294,7 +319,7 @@ def proxy_metrics(rows: list[dict], outputs: list[dict]) -> dict:
         if r["bucket"] == "A":
             a_n += 1
             a_refused += refused
-            quote_ok = (p["valid"] and not p["refusal"] and p["quote"] is not None and p["k"]
+            quote_ok = (p["valid"] and not p["refusal"] and p["quote"] and p["k"]
                         and 1 <= p["k"] <= len(r["passages"]) and p["quote"] in r["passages"][p["k"] - 1])
             if answered and not quote_ok:
                 bad_quote += 1

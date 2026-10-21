@@ -5,6 +5,7 @@
     modal run --detach raft_gpu_app.py::confirm_check --confirm --max-usd 1.4  # step 7.6c, 1 x H100
     modal run --detach raft_gpu_app.py::casehold_check --confirm --max-usd 0.3 # step 7.6d, 1 x L40S
     modal run --detach raft_gpu_app.py::pilot_eval_check --confirm --max-usd 0.75  # step 7.7a, 1 x H100
+    modal run --detach raft_gpu_app.py::pilot_regen_check --confirm --max-usd 0.3  # 7.7a addendum, 1 x L40S
 
 One container does the whole pilot sweep:
   1. stage the train token shards on local disk (replay windows are random 2 KB reads);
@@ -43,7 +44,7 @@ RUN_DIR = Path(config.RAFT_DIR) / "runs" / "pilot"
 DATA_DIR = Path(config.RAFT_DIR) / "datasets" / "pilot"
 CASEHOLD = Path(config.RAFT_DIR) / "eval" / "casehold_test.jsonl"
 LOCAL_TRAIN = "/tmp/tokens/train"
-SPENT_76_USD = 3.20        # measured: 7.6 $1.37 (incl. two failed launches) + 7.6b $1.18 + 7.6c $0.52 + 7.6d $0.125
+SPENT_76_USD = 3.58        # measured: 7.6 $1.37 + 7.6b $1.18 + 7.6c $0.52 + 7.6d $0.125 + 7.7a $0.32 + regen $0.063
 
 
 def _rate_per_s() -> float:
@@ -422,6 +423,54 @@ def pilot_eval(max_usd: float, compile: bool = True) -> dict:
     (out_dir / "report.json").write_text(json.dumps(report, indent=2, default=str))
     volume.commit()
     return {"report": report, "gens": gens}
+
+
+@app.function(image=gpu_image, gpu=DIAG_GPU, volumes=VOLUMES, timeout=60 * 20, cpu=8.0, memory=16_384)
+def pilot_regen(max_usd: float) -> dict:
+    """7.7a addendum: regenerate dev with the fixed CopyConstraint (forced scaffold, forced close,
+    240-char cap) from the saved 7.7a weights, at the 7.7a tau. Generation only."""
+    import torch
+    from transformers import AutoTokenizer
+
+    import eval_raft as E
+    import sft
+    from train import autocast
+
+    t0 = time.time()
+    spent = lambda: (time.time() - t0 + 60.0) * config.GPU_RATE_PER_SEC[DIAG_GPU] * config.COST_OVERHEAD_FACTOR
+    d = Path(config.RAFT_DIR) / "runs" / "pilot_final"
+    device = torch.device("cuda")
+    tok = AutoTokenizer.from_pretrained(config.TOKENIZER_DIR)
+    dev = sft.tokenize(sft.load_rows(DATA_DIR / "dev.jsonl"), tok, config.SEQ_LEN)
+    raw = sft.load_init(config.RAFT_INIT_CKPT).to(device)
+    raw.load_state_dict(torch.load(d / "final.pt", map_location=device, weights_only=False))
+    tau = json.loads((d / "report.json").read_text())["tau"]["tau"]
+    if spent() * 3 > max_usd:
+        raise SystemExit(f"budget: generation would cross --max-usd {max_usd}")
+    g = E.generate_batch(raw, tok, [r["prompt"] for r in dev.rows], [len(r["passages"] or []) for r in dev.rows],
+                         device, tau=tau, batch=64, autocast=lambda: autocast(device),
+                         copy_passages=[r["passages"] or [] for r in dev.rows])
+    gens = [{"id": r["id"], "bucket": r["bucket"], "s": o["s"], "choice": o["choice"], "text": o["text"]}
+            for r, o in zip(dev.rows, g)]
+    with (d / "dev_gen_copy2.jsonl").open("w") as fh:
+        fh.writelines(json.dumps(x) + "\n" for x in gens)
+    volume.commit()
+    return {"gens": gens, "proxies": E.proxy_metrics(dev.rows, g), "tau": tau, "spent_usd": spent()}
+
+
+@app.local_entrypoint()
+def pilot_regen_check(confirm: bool = False, max_usd: float = 0.3):
+    """7.7a addendum (paid: 1 x L40S). Requires --confirm; draws on what is left of the 7.6 GPU cap."""
+    if not confirm:
+        raise SystemExit("This uses a GPU and costs money. Re-run with --confirm once approved.")
+    left = config.RAFT_STAGE_CAPS_USD["7.6-pilot-gpu"] - SPENT_76_USD
+    if max_usd > left:
+        raise SystemExit(f"--max-usd {max_usd} exceeds what is left of the 7.6 cap (${left:.2f})")
+    out = pilot_regen.remote(max_usd)
+    d = Path(".smoke/raft/pilot/eval")
+    (d / "dev_gen_copy2.jsonl").write_text("".join(json.dumps(x) + "\n" for x in out["gens"]))
+    print(f"tau {out['tau']}: " + " ".join(f"{k} {v:.3f}" for k, v in out["proxies"].items()))
+    print(f"spent ${out['spent_usd']:.3f} -> {d / 'dev_gen_copy2.jsonl'}")
 
 
 @app.local_entrypoint()

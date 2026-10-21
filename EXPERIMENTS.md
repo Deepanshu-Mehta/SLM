@@ -419,6 +419,30 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - Plain accuracy is unchanged (0.121 → 0.119).
 - Caveat: these are LR 2e-4 weights; 7.6c's LR 5e-5 weights weren't saved.
 
+### E-31 · Step 7.7 pilot evaluation with the J1 judge (2026-10-21, ≈ $0.61)
+- **Retrain of the chosen setting reproduces 7.6c:** macro-F1 0.842, bits/byte +0.0052. τ = 0.75 by the
+  pre-registered rule, which meets both decision targets (over-refusal 0.105, recall 0.815).
+- **Copy-decoding format fixes** (forced `\nAnswer:` scaffold, forced close, 240-char cap): format 0.966 → 0.998,
+  quote fidelity 0.841 → 0.993.
+- **J1 on dev, serving mode (`copy2`):**
+
+  | Metric | Value | Target | |
+  |---|---|---|---|
+  | Grounded accuracy | **0.215** | 0.60 | ❌ |
+  | Hallucination | **0.349** | 0.15 | ❌ |
+  | Citation | 0.780 | 0.80 | ❌ (close) |
+  | Refusal recall | 0.815 | | ✅ |
+  | Over-refusal | 0.109 | | ✅ |
+  | Quote fidelity | 0.993 | | ✅ |
+  | Format | 0.998 | | ✅ |
+
+- **The bottleneck is reading within the passage.** The model cites the oracle 78% of the time but is
+  correct on only 31% of those.
+- **Composition of the 34.9% hallucination** (shares of all dev items): unsupported A 17.2%,
+  unsupported C 12.6% (63 of 100 grounded tasks), answered unanswerable 4.6%.
+- **The proxy matches J1 under copy decoding** (55/8/4/178).
+- **Projection:** 10K → grounded accuracy ≈ 0.30–0.45, so the 0.60 target likely missed.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -448,6 +472,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-23 | 10-21 | (User's choice, option 2) 7.8 uses LR 5e-5 / λ 1.0 and keeps the final epoch. Bits/byte stays a gate; CaseHOLD PMI is reported, not gated, and its −2 point limit is recorded as missed (−4.7) | E-28–E-30: LR 5e-5 holds bits/byte (+0.005); the CaseHOLD drop appears in epoch 1 whatever the setting, and the mean context-attributable margin is unchanged |
 | D-24 | 10-21 | Serving API redeployed on the new account: `https://deepanshu-m23csai--slm-125m-serve-api.us-east.modal.run`; `config.API_URL` and the website updated, Vercel redeployed | The user's instruction (old account's credits ending). All endpoints and CORS verified from the public URL; the live site's bundle references only the new URL |
 | D-25 | 10-21 | 7.7 as planned in `docs/08-raft.md` §13. Retrain the chosen pilot setting once and save it. τ = the highest dev macro-F1 with over-refusal(A) ≤ 0.20 and recall(B) ≥ 0.80. J1 (Gemini) on both decodings (new cap `7.7-judge` $1, pending approval). `config.SFT` now carries D-23 (LR 5e-5, λ 1.0, keep final, refusal 35%); the 7.6 entrypoints pin their original recipe | Review before 7.7: the judged grounded accuracy is unknown (proxy 0.193 vs target 0.60), and nothing from the chosen setting was saved |
+| D-26 | 10-21 | Serving/eval decoding = `copy2` (copy-constrained with forced scaffold, forced close, 240-char cap), τ = 0.75 for the pilot weights (7.8 re-picks τ by the same rule on its own dev). Recommendation: go to 7.8 | E-31: format 0.998 and quote fidelity 0.993; τ rule met. Data is the only evidenced lever, and it's cheap (≈ $0.25 per 1K) |
 
 ## Corrections log
 

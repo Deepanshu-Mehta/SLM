@@ -303,7 +303,10 @@ class SFTConfig:
     pilot_max_epochs: int = 8
     sft_per_replay: int = 4              # 1 replay window per 4 SFT sequences
     replay_weight: float = 1.0           # lambda: L = L_sft + lambda * L_replay. D-23 (was 0.25)
-    keep: str = "final"                  # D-23: keep the final epoch; 'best' (by dev macro-F1) is noisy (E-28)
+    keep: str = "select"                 # D-27: best dev proxy score (copy2) among evals passing the bits/byte gate
+    full_sizes: tuple[int, ...] = (5_000, 10_000, 20_000)   # 7.8 learning curve (D-27)
+    full_evals: tuple[int, ...] = (4, 4, 8)                  # evals per run (20K: every 3/8 epoch)
+    tau_pilot: float = 0.75              # 7.7 tau, used for in-training copy2 evals
     refusal_share: float = 0.35          # 7.6 selection; tau trades recall vs over-refusal after training
     weight_decay: float = 0.1
     grad_clip: float = 1.0

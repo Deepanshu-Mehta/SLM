@@ -449,6 +449,11 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   This is a generalisation gap, so more unique data is the lever.
 - **J1 spot-check:** 15/15 verdicts agree with a manual reading.
 
+### E-33 · 7.8 sources: SEC has too few eligible filings for one passage each (2026-10-21)
+- One source passage per document gave SEC 1,804 of 6,680 (case law and web were full).
+- Fix: up to 4 passages per SEC filing, which gives 6,680 from 1,757 filings. The mix stays 40/40/20,
+  with 0 overlap with trial/pilot sources.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -479,6 +484,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-24 | 10-21 | Serving API redeployed on the new account: `https://deepanshu-m23csai--slm-125m-serve-api.us-east.modal.run`; `config.API_URL` and the website updated, Vercel redeployed | The user's instruction (old account's credits ending). All endpoints and CORS verified from the public URL; the live site's bundle references only the new URL |
 | D-25 | 10-21 | 7.7 as planned in `docs/08-raft.md` §13. Retrain the chosen pilot setting once and save it. τ = the highest dev macro-F1 with over-refusal(A) ≤ 0.20 and recall(B) ≥ 0.80. J1 (Gemini) on both decodings (new cap `7.7-judge` $1, pending approval). `config.SFT` now carries D-23 (LR 5e-5, λ 1.0, keep final, refusal 35%); the 7.6 entrypoints pin their original recipe | Review before 7.7: the judged grounded accuracy is unknown (proxy 0.193 vs target 0.60), and nothing from the chosen setting was saved |
 | D-26 | 10-21 | Serving/eval decoding = `copy2` (copy-constrained with forced scaffold, forced close, 240-char cap), τ = 0.75 for the pilot weights (7.8 re-picks τ by the same rule on its own dev). Recommendation: go to 7.8 | E-31: format 0.998 and quote fidelity 0.993; τ rule met. Data is the only evidenced lever, and it's cheap (≈ $0.25 per 1K) |
+| D-27 | 10-21 | (User) 7.8 at **20K** training examples; checkpoint selected by the dev proxy score under `copy2` among evals with bits/byte ≤ +0.02; learning curve 5K/10K/20K judged by J1 | E-32: the pilot memorises (train 0.95 vs dev 0.23), and content overfits from epoch 3 while decision-F1 rises; data ≈ $0.25 per 1K |
 
 ## Corrections log
 

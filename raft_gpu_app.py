@@ -6,6 +6,7 @@
     modal run --detach raft_gpu_app.py::casehold_check --confirm --max-usd 0.3 # step 7.6d, 1 x L40S
     modal run --detach raft_gpu_app.py::pilot_eval_check --confirm --max-usd 0.75  # step 7.7a, 1 x H100
     modal run --detach raft_gpu_app.py::pilot_regen_check --confirm --max-usd 0.3  # 7.7a addendum, 1 x L40S
+    modal run --detach raft_gpu_app.py::full_check --confirm --max-usd 2.0       # step 7.8, 1 x H100
 
 One container does the whole pilot sweep:
   1. stage the train token shards on local disk (replay windows are random 2 KB reads);
@@ -42,6 +43,8 @@ volume = modal.Volume.from_name(config.VOLUME_NAME, create_if_missing=True)
 VOLUMES = {config.DATA_ROOT: volume}
 RUN_DIR = Path(config.RAFT_DIR) / "runs" / "pilot"
 DATA_DIR = Path(config.RAFT_DIR) / "datasets" / "pilot"
+SCALE_DIR = Path(config.RAFT_DIR) / "datasets" / "scale"      # 7.8: 20K train + the frozen pilot dev/test
+FULL_DIR = Path(config.RAFT_DIR) / "runs" / "full"
 CASEHOLD = Path(config.RAFT_DIR) / "eval" / "casehold_test.jsonl"
 LOCAL_TRAIN = "/tmp/tokens/train"
 SPENT_76_USD = 3.58        # measured: 7.6 $1.37 + 7.6b $1.18 + 7.6c $0.52 + 7.6d $0.125 + 7.7a $0.32 + regen $0.063
@@ -471,6 +474,173 @@ def pilot_regen_check(confirm: bool = False, max_usd: float = 0.3):
     (d / "dev_gen_copy2.jsonl").write_text("".join(json.dumps(x) + "\n" for x in out["gens"]))
     print(f"tau {out['tau']}: " + " ".join(f"{k} {v:.3f}" for k, v in out["proxies"].items()))
     print(f"spent ${out['spent_usd']:.3f} -> {d / 'dev_gen_copy2.jsonl'}")
+
+
+@app.function(image=gpu_image, gpu=f"{config.SFT.gpu}:{config.SFT.gpu_count}", volumes=VOLUMES,
+              timeout=60 * 50, cpu=8.0, memory=32_768)
+def full_run(max_usd: float, compile: bool = True) -> dict:
+    """Step 7.8: the learning curve (config.SFT.full_sizes) on the 20K pool, each run keeping the
+    checkpoint with the best dev proxy score under copy2 among evals that pass the bits/byte gate
+    (D-27). Per run: tau by the pre-registered rule, dev generations (plain, copy2). For the best
+    run: test generations, CaseHOLD, per-source bits/byte, HF export. Results are appended per run;
+    a restarted container skips finished runs."""
+    import torch
+    from transformers import AutoTokenizer
+
+    import eval_forgetting as EF
+    import eval_raft as E
+    import sft
+    from data import WindowStore
+    from train import autocast
+
+    t0 = time.time()
+    spent = lambda: (time.time() - t0 + 60.0) * _rate_per_s()
+    S = config.SFT
+    FULL_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = FULL_DIR / "log.txt"
+
+    def log(m: str) -> None:
+        line = f"[{time.time() - t0:7.0f}s ${spent():.2f}] {m}"
+        print(line, flush=True)
+        with log_path.open("a") as fh:
+            fh.write(line + "\n")
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    device = torch.device("cuda")
+    ac = lambda: autocast(device)
+    shutil.copytree(config.TRAIN_TOKENS_DIR, LOCAL_TRAIN, dirs_exist_ok=True)
+    store = WindowStore.open(LOCAL_TRAIN, config.SEQ_LEN)
+    tok = AutoTokenizer.from_pretrained(config.TOKENIZER_DIR)
+    dec = E.decision_ids(tok)
+    pool = sft.load_rows(SCALE_DIR / "train.jsonl")
+    dev = sft.tokenize(sft.load_rows(SCALE_DIR / "dev.jsonl"), tok, config.SEQ_LEN)
+    raw = sft.load_init(config.RAFT_INIT_CKPT).to(device)
+    base_state = {k: v.detach().clone() for k, v in raw.state_dict().items()}
+    val_dir = Path(config.VAL_TOKENS_DIR)
+    subset = EF.heldout_subset(val_dir)
+    base = json.loads((RUN_DIR / "guards_base.json").read_text())
+    base_bpb = base["heldout"]["pooled_bpb"]
+    prompts, ks = [r["prompt"] for r in dev.rows], [len(r["passages"] or []) for r in dev.rows]
+    cps = [r["passages"] or [] for r in dev.rows]
+    log(f"staged: pool {len(pool)} rows, dev {len(dev)}; base bpb {base_bpb:.4f}")
+    net = torch.compile(raw) if compile else raw
+    res_path = FULL_DIR / "results.jsonl"
+    done = {json.loads(ln)["n"] for ln in res_path.read_text().splitlines() if ln.strip()} if res_path.exists() else set()
+
+    def extra() -> dict:                       # every eval: bits/byte gate + copy2 proxy score on dev
+        bpb = EF.heldout_bpb(raw, tok, val_dir, subset, device, ac, batch=16)["pooled_bpb"]
+        g = E.generate_batch(raw, tok, prompts, ks, device, tau=S.tau_pilot, batch=64, autocast=ac, copy_passages=cps)
+        m = E.proxy_metrics(dev.rows, g)
+        return {"heldout_pooled_bpb": bpb, "bpb_delta": bpb - base_bpb,
+                "gate_ok": bpb - base_bpb <= config.RAFT.max_bpb_increase,
+                "select_score": m["selection_score"], **{f"proxy_{k}": v for k, v in m.items()}}
+
+    for n, n_evals in zip(S.full_sizes, S.full_evals):
+        if n in done:
+            continue
+        plan = sft.make_plan(n, S.epochs, config.SEQ_LEN)
+        est = (plan.total_steps * 0.3 + n_evals * 35 + 90) * _rate_per_s()
+        if spent() + est > max_usd:
+            log(f"budget: run n={n} (est ${est:.2f}) would cross --max-usd {max_usd}; stopping")
+            break
+        t1 = time.time()
+        raw.load_state_dict(base_state)
+        sft.init_chat_tokens(raw, S.seed)
+        train = sft.tokenize(sft.select_mix(pool, n, S.refusal_share, S.seed), tok, config.SEQ_LEN)
+        cfg = sft.RunConfig(epochs=S.epochs, gpu=S.gpu, max_usd=max_usd, log_every=10_000, keep=S.keep,
+                            eval_every=max(1, round(plan.total_steps / n_evals)))
+        log(f"run n={n}: {plan.total_steps} steps, eval every {cfg.eval_every}, lr {cfg.lr:g} lambda {cfg.replay_weight:g}")
+        res = sft.train_one(cfg, raw, net, train, dev, store, dec, device, None, log=lambda *_: None, extra_eval=extra)
+        raw.load_state_dict(res["best_state"])
+        torch.save(res["best_state"], FULL_DIR / f"n{n}.pt")
+        tf = E.teacher_forced(raw, [r[:m].tolist() for r, m in zip(dev.ids, dev.length)], dev.decision_pos.tolist(),
+                              list(dev.mask), device, dec, 16, ac)
+        tau = E.choose_tau(E.tau_table(tf["s"], dev.refusal.tolist(), dev.buckets))
+        gens, prox = {}, {}
+        for mode in ("plain", "copy2"):
+            g = E.generate_batch(raw, tok, prompts, ks, device, tau=tau["tau"], batch=64, autocast=ac,
+                                 copy_passages=cps if mode == "copy2" else None)
+            gens[mode] = [{"id": r["id"], "bucket": r["bucket"], "s": o["s"], "choice": o["choice"], "text": o["text"]}
+                          for r, o in zip(dev.rows, g)]
+            prox[mode] = E.proxy_metrics(dev.rows, g)
+        best = res["best"]
+        row = {"n": n, "steps": res["steps"], "selected_step": best["step"], "gate_ok": best.get("gate_ok"),
+               "bpb_delta": best.get("bpb_delta"), "select_score": best.get("select_score"),
+               "dev_macro_f1": best["dev_macro_f1"], "dev_auroc": best["dev_auroc"], "tau": tau,
+               "proxies": prox, "history": [{k: h.get(k) for k in ("step", "dev_macro_f1", "dev_target_loss",
+                                                                     "bpb_delta", "select_score", "gate_ok")}
+                                            for h in res["history"]],
+               "gens": gens, "seconds": round(time.time() - t1, 1)}
+        with res_path.open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
+        volume.commit()
+        log(f"n={n}: step {best['step']}/{res['steps']} gate {best.get('gate_ok')} bpb {best.get('bpb_delta', 0):+.4f} | "
+            f"tau {tau['tau']} | copy2 score {prox['copy2']['selection_score']:+.3f} grounded "
+            f"{prox['copy2']['proxy_grounded_acc']:.3f} | plain {prox['plain']['selection_score']:+.3f} ({row['seconds']}s)")
+
+    rows = [json.loads(ln) for ln in res_path.read_text().splitlines() if ln.strip()]
+    if not rows:
+        return {"status": "no_runs", "spent_usd": spent()}
+    top = max(rows, key=lambda r: r["proxies"]["copy2"]["selection_score"])
+    final_path = FULL_DIR / "final.json"
+    if final_path.exists():
+        final = json.loads(final_path.read_text())
+    elif spent() + 150 * _rate_per_s() > max_usd:
+        log("budget: no room for the test pass; stopping before it")
+        return {"status": "budget_stop", "runs": rows, "spent_usd": spent()}
+    else:
+        raw.load_state_dict(torch.load(FULL_DIR / f"n{top['n']}.pt", map_location=device, weights_only=False))
+        test = sft.tokenize(sft.load_rows(SCALE_DIR / "test.jsonl"), tok, config.SEQ_LEN)
+        tgens = {}
+        for mode in ("plain", "copy2"):
+            g = E.generate_batch(raw, tok, [r["prompt"] for r in test.rows], [len(r["passages"] or []) for r in test.rows],
+                                 device, tau=top["tau"]["tau"], batch=64, autocast=ac,
+                                 copy_passages=[r["passages"] or [] for r in test.rows] if mode == "copy2" else None)
+            tgens[mode] = [{"id": r["id"], "bucket": r["bucket"], "s": o["s"], "choice": o["choice"], "text": o["text"]}
+                           for r, o in zip(test.rows, g)]
+        tft = E.teacher_forced(raw, [r[:m].tolist() for r, m in zip(test.ids, test.length)],
+                               test.decision_pos.tolist(), list(test.mask), device, dec, 16, ac)
+        items = [json.loads(ln) for ln in CASEHOLD.read_text().splitlines() if ln.strip()]
+        guards = {"heldout": EF.heldout_bpb(raw, tok, val_dir, subset, device, ac, batch=16),
+                  "casehold": EF.score_casehold(raw, tok, items, device, ac, items_per_batch=16)}
+        sft.export(raw, None, FULL_DIR / "hf", config.TOKENIZER_DIR, tau=top["tau"]["tau"])
+        final = {"n": top["n"], "tau": top["tau"]["tau"], "test_gens": tgens,
+                 "test_decision": E.decision_metrics(tft["s"], test.refusal.tolist(), test.buckets, top["tau"]["tau"]),
+                 "guards": guards,
+                 "bpb_delta_by_source": {s: guards["heldout"][s]["bpb"] - base["heldout"][s]["bpb"]
+                                         for s in ("case-law", "sec", "fineweb-edu")},
+                 "bpb_delta_pooled": guards["heldout"]["pooled_bpb"] - base_bpb,
+                 "casehold_pmi_delta_points": 100 * (guards["casehold"]["acc_pmi"] - base["casehold"]["acc_pmi"])}
+        final_path.write_text(json.dumps(final, default=str))
+        volume.commit()
+        log(f"final n={top['n']}: tau {final['tau']} | test AUROC {final['test_decision']['auroc']:.3f} | "
+            f"bpb {final['bpb_delta_pooled']:+.4f} | casehold {final['casehold_pmi_delta_points']:+.1f}")
+    return {"status": "completed", "runs": rows, "final": final, "spent_usd": spent(), "wall_seconds": time.time() - t0}
+
+
+@app.local_entrypoint()
+def full_check(confirm: bool = False, max_usd: float = 2.0, compile: bool = True):
+    """Step 7.8 GPU (paid: 1 x H100). Requires --confirm; cap config.RAFT_STAGE_CAPS_USD['7.8-full-gpu']."""
+    if not confirm:
+        raise SystemExit("Step 7.8 uses a GPU and costs money. Re-run with --confirm once approved.")
+    cap = config.RAFT_STAGE_CAPS_USD["7.8-full-gpu"]
+    if max_usd > cap:
+        raise SystemExit(f"--max-usd {max_usd} exceeds the approved cap ${cap}")
+    rep = full_run.remote(max_usd, compile)
+    d = Path(".smoke/raft/scale/eval")
+    d.mkdir(parents=True, exist_ok=True)
+    for r in rep.get("runs", []):
+        for mode, g in r.pop("gens").items():
+            (d / f"dev_n{r['n']}_{mode}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in g))
+    if rep.get("final"):
+        for mode, g in rep["final"].pop("test_gens").items():
+            (d / f"test_{mode}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in g))
+    (d / "report.json").write_text(json.dumps(rep, indent=2, default=str))
+    for r in rep.get("runs", []):
+        print(f"n={r['n']}: step {r['selected_step']}/{r['steps']} gate {r['gate_ok']} | tau {r['tau']['tau']} | "
+              f"copy2 {r['proxies']['copy2']['selection_score']:+.3f} grounded {r['proxies']['copy2']['proxy_grounded_acc']:.3f}")
+    print(f"status {rep['status']}; spent ${rep['spent_usd']:.2f} -> {d}")
 
 
 @app.local_entrypoint()

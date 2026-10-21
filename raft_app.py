@@ -222,9 +222,10 @@ def build_bm25(rows: list[dict], out_dir: Path | None, probes: int = 500,
 
 
 def select_train_sources(rows_by_source: dict[str, list[dict]], n: int, plan: dict[str, float],
-                         exclude: set[str] = frozenset(), seed: int = config.RAFT.seed) -> list[dict]:
+                         exclude: set[str] = frozenset(), seed: int = config.RAFT.seed,
+                         per_doc: dict[str, int] | None = None) -> list[dict]:
     """Source passages for generation from the train pool: 40/40/20 by source, one per
-    document, documents with >= 4 chunks (so same-document distractors exist), SEC numeric
+    document (or `per_doc[source]` per document: 7.8 needs 4 per SEC filing, E-33), documents with >= 4 chunks (so same-document distractors exist), SEC numeric
     quota filled first (~10%). `plan` maps generator kind (G1/G2/G3) to its share."""
     import random
 
@@ -235,7 +236,8 @@ def select_train_sources(rows_by_source: dict[str, list[dict]], n: int, plan: di
         pool = [r for r in rows_by_source[source]
                 if r["elig"] and r["n_chunks"] >= 4 and r["pid"] not in exclude]
         rng.shuffle(pool)
-        used_docs: set[str] = set()
+        used_docs: Counter = Counter()
+        cap = (per_doc or {}).get(source, 1)
         quota = round(want * 0.10) if source == "sec" else 0
         got: list[dict] = []
         for group, limit in (([r for r in pool if r["elig"] == "numeric"], quota),
@@ -244,9 +246,9 @@ def select_train_sources(rows_by_source: dict[str, list[dict]], n: int, plan: di
             for r in group:
                 if len(got) >= want or taken >= limit:
                     break
-                if r["doc"] in used_docs:
+                if used_docs[r["doc"]] >= cap:
                     continue
-                used_docs.add(r["doc"])
+                used_docs[r["doc"]] += 1
                 got.append(r)
                 taken += 1
         picked.extend(got)
@@ -448,13 +450,14 @@ def _pool_rows(split: str, source: str) -> list[dict]:
 
 
 @app.function(image=image, volumes=VOLUMES, timeout=60 * 30, cpu=2.0, memory=16_384)
-def train_sources(stage: str, n: int, plan: dict, exclude_stages: list[str] = ()) -> dict:
+def train_sources(stage: str, n: int, plan: dict, exclude_stages: list[str] = (),
+                  per_doc: dict[str, int] | None = None) -> dict:
     """Pick n train source passages for a stage; writes raft/{stage}/sources.jsonl."""
     t0 = time.time()
     exclude = {r["pid"] for st in exclude_stages if (RAFT / st / "sources.jsonl").exists()
                for r in _jsonl(RAFT / st / "sources.jsonl")}
     rows = {s: _pool_rows("train", s) for s in SOURCES}
-    out = select_train_sources(rows, n, plan, exclude)
+    out = select_train_sources(rows, n, plan, exclude, per_doc=per_doc)
     _write_jsonl(RAFT / stage / "sources.jsonl", out)
     volume.commit()
     return {"rows": out, "seconds": time.time() - t0, "cpu": 2.0, "mem_gib": 16.0}

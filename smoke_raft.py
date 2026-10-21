@@ -622,6 +622,24 @@ def sweep_checks(tok) -> None:
     check("keep='final' (D-23): returns the last epoch and exactly the final weights",
           rf["best"]["step"] == rf["history"][-1]["step"] == rf["steps"] and same,
           f"best step {rf['best']['step']} of {rf['steps']}")
+    def scripted(evals):                       # extra_eval returning a fixed sequence of (gate, score, bpb)
+        it = iter(evals)
+        return lambda: dict(zip(("gate_ok", "select_score", "heldout_pooled_bpb"), next(it)))
+    sel_cfg = sft.RunConfig(**{**sft.asdict(cfg), "keep": "select", "eval_every": 2})
+    rs = sft.train_one(sel_cfg, tiny, tiny, train, dev, store, dec, torch.device("cpu"), None, log=lambda *_: None,
+                       extra_eval=scripted([(False, 0.9, 0.73), (True, 0.1, 0.72), (True, 0.5, 0.72), (False, 0.99, 0.70)]))
+    check("keep='select' (D-27): best proxy score among gate-passing evals (not the higher-scoring gate failure)",
+          rs["best"]["step"] == 6 and rs["best"]["select_score"] == 0.5, f"step {rs['best']['step']}")
+    rs2 = sft.train_one(sel_cfg, tiny, tiny, train, dev, store, dec, torch.device("cpu"), None, log=lambda *_: None,
+                        extra_eval=scripted([(False, 0.9, 0.75), (False, 0.1, 0.71), (False, 0.5, 0.73), (False, 0.2, 0.74)]))
+    check("keep='select': no eval passes the gate -> the lowest bits/byte, flagged gate_ok=False",
+          rs2["best"]["step"] == 4 and rs2["best"]["gate_ok"] is False, f"step {rs2['best']['step']}")
+    try:
+        sft.train_one(sel_cfg, tiny, tiny, train, dev, store, dec, torch.device("cpu"), None, log=lambda *_: None)
+        raised = False
+    except ValueError:
+        raised = True
+    check("keep='select' without extra_eval is refused", raised)
     tiny.load_state_dict(r["best_state"])
     rows8 = synthetic_rows(8, seed=5)
     gens = E.generate_batch(tiny, tok, [x["prompt"] for x in rows8], [len(x["passages"]) for x in rows8],

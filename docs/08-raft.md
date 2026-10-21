@@ -1548,3 +1548,105 @@ Asked by the user: any mistakes, start 7.8 or correct first, add more data?
   - The τ rule was applied as pre-registered.
   - The test set is untouched.
   - The bits/byte guard was reproduced three times.
+
+### 7.8 Scale to 20K, full SFT, final test: PLAN (written 2026-10-21, before any run)
+**User decisions (D-27):**
+- **20K** training examples (not 10K): the pilot memorises (E-32), and data is cheap.
+- **Checkpoint selection on the dev proxy score under `copy2`** (content + decisions), with held-out
+  bits/byte ≤ +0.02 as the gate (C-14). This replaces "best decision-F1" (§7.1) and D-23's "final epoch".
+
+**Data (stage `scale`, train only; dev/test/probe stay the frozen pilot sets).**
+- **Target train pool, 20,320 rows** (`select_mix(20,000, 0.35)` needs A 9,533 / B1 4,200 / B2 2,100 /
+  B3 700 / C 3,467): A 9,600, B1 4,250, B2 2,150, B3 720, C 3,600.
+- The pilot's 2,400 train rows are reused. Pilot B2 is re-checked with the new V3; drops are
+  replaced from the scale pool.
+- **Scale quotas:** A 8,353 / B1 3,830 / B2 2,000 / B3 650 / C 3,147.
+- **Generator calls**, sized from the pilot's train keep rates (E-23) with ~10% margin:
+  - G1 9,300 (≈ 0.99 kept A per call);
+  - G2 3,600 (0.69 → ~0.55 B2 per call expected under V3);
+  - G3 3,800 (0.91 C per call).
+- **Source passages:** new train passages only, excluding everything used in the trial and pilot.
+- **G1 type rotation:** case law gets `rule_or_holding` twice per rotation (pilot: 6% of A).
+- **G2 prohibitions** (from the E-25 read-through). The missing detail must not be:
+  - stated anywhere in the passage;
+  - computable by simple arithmetic from figures for the same item;
+  - partially or qualitatively stated for the same item;
+  - the answer to an underspecified question about an unnamed party, or one with two parts.
+  Questions about a *different* year, entity or metric than the one the passage gives are encouraged.
+- **New V3 near-miss check** (DeepSeek, no thinking) on every B2, including the pilot's 210 train B2:
+  "could a careful reader give a plausible answer, including by arithmetic or a partial statement?"
+  A B2 is kept only if V1 says unanswerable **and** V3 says no.
+- **Checks:** the train rule as before, DeepSeek V1/V2 without thinking (D-19), plus V3 for B2.
+- **5% Gemini audit:** 1,000 random scale train rows, Gemini V1/V2/V3. Per-bucket disagreement
+  is reported. If any bucket disagrees > 15%, stop and bring it to the user (fallback ≤ $3 within the cap).
+
+**Training (1 × H100, one container, `raft_gpu_app.py::full_run`).**
+- **Curve:** 5K, 10K and 20K examples, each `select_mix(n, 0.35)` from the same pool. Smaller sets are
+  not subsets, but share the pool and the seed.
+- **Recipe:** LR 5e-5, λ 1.0, 3 epochs, batch 64. Steps: 5K ≈ 291, 10K ≈ 579, 20K ≈ 1,155.
+- **Evaluation and checkpoint choice:**
+  - Each eval runs the dev decision metrics (teacher-forced), dev generation under `copy2` at τ 0.75
+    with its proxy selection score, and held-out bits/byte.
+  - The 20K run evaluates 8 times (every 3/8 epoch); the 5K and 10K runs 4 times each.
+  - **Selection:** the highest proxy score among evals with bits/byte ≤ +0.02. If none passes, the
+    lowest bits/byte, flagged.
+- **For each run's selected weights:**
+  - the τ table on dev with the same pre-registered rule (§13 7.7);
+  - dev generations at that τ (plain and `copy2`), saved.
+- **For the best run** (highest dev proxy score):
+  - test generations (plain and `copy2`);
+  - CaseHOLD and per-source bits/byte;
+  - weights and HF export to `/data/raft/runs/full/`.
+- **Cost:** ≈ 21 minutes ≈ **$1.6**, `--max-usd 2.0` (cap $2). The container checks spend before every
+  run and eval. Each run's result is saved as it finishes, so a restart resumes at the next run.
+
+**Judging (Gemini J1, from the `7.8-scale-data` cap).**
+- Dev `copy2` outputs of all three curve points: the judged learning curve.
+- Test plain and `copy2` outputs of the best run: the headline numbers (§8.1), reported once and never tuned on.
+- **Teacher ceiling:** DeepSeek answers 200 test items, judged by J1 (§8.3).
+
+**Budget (cap $12 data/API + $2 GPU).**
+
+| Item | Estimate |
+|---|---|
+| Generation, ~16.7K calls | ≈ $2.2 |
+| Checks, ~17K V1/V2 + ~3.6K V3 | ≈ $2.9 |
+| Audit | ≈ $0.4 |
+| J1 (dev curve + test) | ≈ $0.8 |
+| Ceiling | ≈ $0.1 |
+| **API total** | **≈ $6.4** |
+| GPU | ≈ $1.6 |
+
+Phase 7 would end at ≈ $14.4.
+
+**Validation.**
+- Every quota is met, or the shortfall is reported.
+- 0 val documents in the train pool, and 0 overlap with dev/test documents.
+- The audit is within limits.
+- Off-peak timestamps only.
+- The forgetting gate holds for the selected weights.
+- 0 containers afterwards.
+- The test set is used exactly once, after the model and τ are fixed.
+
+### 7.8 progress log
+- **Code ($0):**
+  - stage `scale` in `raft_pipeline.py`: sources, candidates, V3 check, select merged with the pilot
+    train, and the 5% Gemini audit;
+  - G2 prohibitions and the V3 prompt; `rule_or_holding` requested twice per case-law rotation;
+  - `keep="select"` in the trainer;
+  - `raft_gpu_app.py::full_run`;
+  - J1 and scoring for the scale outputs.
+  - Unit tests: keep="select" picks the best gate-passing eval, falls back to the lowest bits/byte,
+    and refuses to run without an eval hook. 22/22 sweep and eval checks pass.
+- **Fix found while generalising the scorer:** paired consistency counted pairs from the whole rows
+  table instead of the scored set. The pilot numbers are unchanged (0.173, 75 pairs).
+- **Sources (2026-10-21, ≈ $0.006 Modal).**
+  - The first call hung: the local client disconnected and the app stopped after the image build,
+    so nothing ran. Scale Modal calls now use `app.run(detach=True)`.
+  - **The second call returned 11,824 of 16,700 (E-33).** SEC delivered 1,804 of 6,680 because the
+    rule is one source passage per document. Case law and web were full.
+  - Fix: up to **4 passages per SEC filing** (`per_doc`). The source mix stays 40/40/20, and SEC
+    stays at its test share instead of falling to ~15%.
+  - **Result:** 16,700 sources (case law 6,680, SEC 6,680 from 1,757 filings, web 3,340); 0 overlap
+    with trial/pilot passages, 0 duplicates.
+- **Generation started 13:50 UTC** (off-peak), DeepSeek, 32 workers, ≈ $0.00014 per call.

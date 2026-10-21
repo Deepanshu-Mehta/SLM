@@ -39,7 +39,7 @@ TRIAL_PLAN = {"G1": 2 / 3, "G2": 1 / 6, "G3": 1 / 6}
 GEMINI_MAX_TOKENS = 1_024              # Gemini counts thinking inside max_output_tokens
 GEMINI_CHECK_MAX_TOKENS = 384          # trial 7.3: check output+thoughts median 58, max 202 tokens
 GEMINI_CHUNK = 800                     # requests per batch: each worst-case reservation settles first
-CHECKERS = ("ds_off", "ds_on", "gemini")
+CHECKERS = ("ds_off", "ds_on", "gemini", "ds_v3")
 DEVTEST_POOL = Path(".smoke/reports/source_pool_v2.jsonl")   # leak-scanned val sources (7.2 fix)
 
 # Pilot (7.4) quotas: train 2,400 = enough for 15/25/35% refusal mixes of 2,000 (§5);
@@ -56,6 +56,13 @@ PILOT_CALLS = {"train": {"G1": 1300, "G2": 390, "G3": 620}, "dev": {"G1": 305, "
                "test": {"G1": 555, "G2": 206, "G3": 274}, "probe": {"G1": 100}}
 PILOT_B1_CANDIDATES = {"train": 520, "dev": 120, "test": 240}   # dev/test pairs need both twins accepted by both checkers (~0.67)
 TASKS = ("summarize", "extract_list", "yes_no_check")
+# Scale (7.8, D-27): 20K train = the pilot's 2,400 train rows + these quotas (docs/08-raft.md §13 7.8).
+SCALE_QUOTAS = {"train": {"A": 8353, "B1": 3830, "B2": 2000, "B3": 650, "C": 3147}}
+SCALE_CALLS = {"G1": 9300, "G2": 3600, "G3": 3800}       # pilot train keep rates (E-23) + ~10% margin
+SCALE_B1_CANDIDATES = 4400                                 # B1 keep 0.88 in the pilot
+PILOT_DATASETS = LOCAL / "pilot" / "datasets"
+AUDIT_N = 1000                                             # 5% of the scale train rows, Gemini (§13 7.8)
+AUDIT_MAX_DISAGREE = 0.15
 
 
 def sdir(stage: str) -> Path:
@@ -111,6 +118,22 @@ def log_modal_cost(stage: str, what: str, usd: float) -> None:
 def cmd_sources(args) -> None:
     need_confirm(args, "Selecting sources (Modal CPU)")
     modal, A = _modal()
+    if args.stage == "scale":
+        n = sum(SCALE_CALLS.values())
+        plan = {k: v / n for k, v in SCALE_CALLS.items()}
+        with modal.enable_output(), A.app.run(detach=True):     # a dropped client must not stop it (brief)
+            res = A.train_sources.remote("scale", n, plan, ["trial", "pilot"], {"sec": 4})   # E-33
+        log_modal_cost("scale", "sources", modal_cost([res]))
+        rows, seen = res["rows"], Counter()
+        for r in rows:
+            r["group"] = "train"
+            if r["kind"] == "G1":
+                rot = P.TYPE_ROTATION[r["source"]]
+                r["type_hint"] = rot[seen[r["source"]] % len(rot)]
+                seen[r["source"]] += 1
+        n = write_jsonl(sdir("scale") / "sources.jsonl", rows)
+        print(f"{n} sources: {dict(Counter((r['source'], r['kind']) for r in rows))}")
+        return
     if args.stage != "pilot":
         plan = TRIAL_PLAN if args.stage == "trial" else json.loads(args.plan)
         with modal.enable_output(), A.app.run():
@@ -239,7 +262,8 @@ def cmd_candidates(args) -> None:
         probe_a = [c for c in cands if c["bucket"] == "A" and c["group"] == "probe"]
         cands = [c for c in cands if c["group"] != "probe"]
         pairs = [{**c, "bucket": "B1", "cid": c["cid"] + ":B1", "pair": c["cid"]} for c in probe_a]
-        for grp, n in PILOT_B1_CANDIDATES.items():
+        b1_targets = {"train": SCALE_B1_CANDIDATES} if args.stage == "scale" else PILOT_B1_CANDIDATES
+        for grp, n in b1_targets.items():
             a_rows = [c for c in cands if c["bucket"] == "A" and c["group"] == grp]
             pairs += [{**c, "bucket": "B1", "cid": c["cid"] + ":B1", "pair": c["cid"]}
                       for c in rng.sample(a_rows, min(n, len(a_rows)))]
@@ -261,7 +285,7 @@ def cmd_assemble(args) -> None:
         up.put_file(str(st / "candidates.jsonl"), f"raft/{args.stage}/candidates.jsonl")
     cands = jsonl(st / "candidates.jsonl")
     jobs = sorted({(c["split"], c["source"]) for c in cands})
-    with modal.enable_output(), A.app.run():
+    with modal.enable_output(), A.app.run(detach=args.stage == "scale"):
         res = list(A.assemble_source.starmap([(args.stage, sp, so) for sp, so in jobs]))
     log_modal_cost(args.stage, "assemble", modal_cost(res))
     rows = []
@@ -277,6 +301,13 @@ def cmd_assemble(args) -> None:
 # --------------------------------------------------------------------------- check
 def check_jobs(rows: list[dict], checker: str) -> list[Job]:
     jobs = []
+    if checker in ("ds_v3", "gemini_v3"):                 # near-miss check, B2 only (7.8)
+        for r in rows:
+            if r["bucket"] == "B2":
+                system, user = P.v3_messages(r["passages"], r["question"])
+                mt = GEMINI_CHECK_MAX_TOKENS if checker == "gemini_v3" else T.max_tokens_check
+                jobs.append(Job(f"{r['cid']}|{checker}", system, user, mt))
+        return jobs
     for r in rows:
         if r["bucket"] in ("A", "B1", "B2"):
             system, user = P.v1_messages(r["passages"], r["question"])
@@ -296,6 +327,10 @@ def cmd_check(args) -> None:
     need_confirm(args, "Checking (API)")
     st, lg = sdir(args.stage), ledger(args.stage)
     rows = jsonl(st / "assembled.jsonl")
+    if args.checker == "ds_v3":
+        if args.stage != "scale":
+            raise SystemExit("the V3 near-miss check is a 7.8 (scale) step")
+        rows = [r for r in rows if r["bucket"] == "B2"] + pilot_train_b2()
     if args.stage != "trial":
         if args.checker == "ds_on":
             raise SystemExit("thinking checks are off after the trial (D-19)")
@@ -419,7 +454,18 @@ def cmd_report(args) -> None:
 # -------------------------------------------------------------------------- select
 def _verdicts(st: Path) -> dict[str, dict]:
     return {c: {r["key"].split("|")[0]: (r["json"] if r["ok"] else None)
-                for r in jsonl(st / f"checks-{c}.jsonl")} for c in ("ds_off", "gemini")}
+                for r in jsonl(st / f"checks-{c}.jsonl")} for c in ("ds_off", "gemini", "ds_v3")}
+
+
+def v3_ok(v: dict | None) -> bool:
+    """V3 near-miss check: keep a B2 only if a careful reader could NOT give a plausible answer."""
+    return isinstance(v, dict) and v.get("plausible_answer") is False
+
+
+def pilot_train_b2() -> list[dict]:
+    """The pilot's train B2 rows (selected, never reviewed: E-25) in candidate shape, for V3."""
+    return [{"cid": r["id"], "bucket": "B2", "passages": r["passages"], "question": r["question"]}
+            for r in jsonl(PILOT_DATASETS / "train.jsonl") if r["bucket"] == "B2"]
 
 
 def accepted(row: dict, V: dict) -> bool:
@@ -427,6 +473,8 @@ def accepted(row: dict, V: dict) -> bool:
     if row.get("task") == "extract_list":
         return True                                   # model-free (§5.2 check 9)
     ok = bool(accept(row, V["ds_off"].get(row["cid"])))
+    if row["bucket"] == "B2" and V.get("ds_v3"):          # 7.8: near misses also pass V3
+        ok = ok and v3_ok(V["ds_v3"].get(row["cid"]))
     if row["group"] in ("dev", "test", "probe"):
         ok = ok and bool(accept(row, V["gemini"].get(row["cid"])))
     return ok
@@ -574,6 +622,111 @@ def cmd_select(args) -> None:
     print(f"datasets -> {out_dir}; spot-check -> {st / 'spot_check.md'}")
 
 
+def dataset_record(r: dict, grp: str) -> dict:
+    prompt, target = R.render_example(r)
+    return {"id": r["cid"], "group": grp, "bucket": r["bucket"], "source": r["source"],
+            "prompt": prompt, "target": target, "k": r.get("k"),
+            "question": r.get("question"), "task": r.get("task"),
+            "task_text": r.get("task_text"), "answer": r.get("answer") or r.get("response"),
+            "quote": r.get("quote"), "passages": r.get("passages"), "pids": r.get("pids"),
+            "pair": r.get("pair"), "type": r.get("type"), "label": r.get("label"),
+            "entity_present": r.get("entity_present"), "n_tokens": r.get("n_tokens")}
+
+
+def cmd_select_scale(args) -> None:
+    """7.8: scale quotas from accepted scale rows + the pilot train rows (pilot B2 must pass V3);
+    dev/test/probe are copied unchanged from the frozen pilot sets ($0)."""
+    from transformers import AutoTokenizer
+
+    st = sdir("scale")
+    tok = AutoTokenizer.from_pretrained(".smoke/final/base")
+    rows, V = jsonl(st / "assembled.jsonl"), _verdicts(st)
+    rng = random.Random(config.RAFT.seed)
+    acc = [r for r in rows if accepted(r, V)]
+    by = defaultdict(list)
+    for r in acc:
+        by[r["bucket"]].append(r)
+    for b in by:
+        rng.shuffle(by[b])
+    q = SCALE_QUOTAS["train"]
+    others = defaultdict(list)
+    for r in jsonl(st / "sources.jsonl"):
+        others[r["source"]].append(r)
+    a_sel = by["A"][:q["A"]]
+    b3 = make_b3(by["A"][q["A"]:] + a_sel, q["B3"], others, tok, rng)
+    chosen = a_sel + by["B1"][:q["B1"]] + by["B2"][:q["B2"]] + by["C"][:q["C"]] + b3
+    got = Counter(r["bucket"] for r in chosen)
+    pilot = jsonl(PILOT_DATASETS / "train.jsonl")
+    v3_drop = [r["id"] for r in pilot if r["bucket"] == "B2" and not v3_ok(V["ds_v3"].get(r["id"]))]
+    pilot_kept = [r for r in pilot if r["id"] not in set(v3_drop)]
+    train = pilot_kept + [dataset_record(r, "train") for r in chosen]
+    rng.shuffle(train)
+    devtest_docs = {pid.rsplit("/", 1)[0] for g in ("dev", "test", "probe")
+                    for r in jsonl(PILOT_DATASETS / f"{g}.jsonl") for pid in (r.get("pids") or [])}
+    train_docs = {pid.rsplit("/", 1)[0] for r in train for pid in (r.get("pids") or [])}
+    out_dir = st / "datasets"
+    out_dir.mkdir(exist_ok=True)
+    write_jsonl(out_dir / "train.jsonl", train)
+    for g in ("dev", "test", "probe"):
+        write_jsonl(out_dir / f"{g}.jsonl", jsonl(PILOT_DATASETS / f"{g}.jsonl"))
+    lg = json.loads((st / "ledger.json").read_text())
+    mc = json.loads((st / "modal_cost.json").read_text()) if (st / "modal_cost.json").exists() else {}
+    rep = {"accepted": {b: len(v) for b, v in by.items()},
+           "assembled": dict(Counter(r["bucket"] for r in rows)),
+           "scale_selected": dict(got), "shortfall": {b: n - got[b] for b, n in q.items() if got[b] < n},
+           "pilot_b2_v3_dropped": len(v3_drop), "pilot_rows_kept": len(pilot_kept),
+           "train_total": len(train), "train_buckets": dict(Counter(r["bucket"] for r in train)),
+           "train_sources": dict(Counter(r["source"] for r in train)),
+           "a_types": dict(Counter(r.get("type") for r in train if r["bucket"] == "A")),
+           "tokens_max": max(r["n_tokens"] for r in train),
+           "doc_overlap_with_devtest": len(train_docs & devtest_docs),
+           "v3_on_scale_b2": {"checked": sum(1 for r in rows if r["bucket"] == "B2" and r["cid"] in V["ds_v3"]),
+                              "pass": sum(1 for r in rows if r["bucket"] == "B2" and v3_ok(V["ds_v3"].get(r["cid"])))},
+           "spend": {"api_usd": lg["spent_usd"], "modal_usd": round(sum(mc.values()), 4), "cap_usd": lg["cap_usd"]},
+           "funnel": json.loads((st / "funnel.json").read_text())}
+    (st / "select_report.json").write_text(json.dumps(rep, indent=2))
+    print(json.dumps({k: v for k, v in rep.items() if k != "funnel"}, indent=1))
+    if rep["doc_overlap_with_devtest"]:
+        raise SystemExit("train shares documents with dev/test: stop")
+
+
+def audit_rows() -> list[dict]:
+    """5% audit sample: AUDIT_N random scale rows selected into the 20K train set (not the pilot's)."""
+    st = sdir("scale")
+    ids = {r["id"] for r in jsonl(st / "datasets" / "train.jsonl")}
+    rows = [r for r in jsonl(st / "assembled.jsonl") if r["cid"] in ids]
+    return random.Random(config.RAFT.seed).sample(rows, min(AUDIT_N, len(rows)))
+
+
+def cmd_audit(args) -> None:
+    """7.8: Gemini re-checks a 5% sample of the scale train rows (V1/V2 and V3 for B2) and reports
+    per-bucket disagreement with the DeepSeek-accepted label. > 15% in any bucket: stop."""
+    st = sdir("scale")
+    rows = audit_rows()
+    out = st / "audit.jsonl"
+    if args.confirm:
+        lg = ledger("scale")
+        jobs = [Job(j.key.replace("|gemini", "|audit"), j.system, j.user, j.max_tokens)
+                for j in check_jobs(rows, "gemini")] + check_jobs(rows, "gemini_v3")
+        GeminiBatch(lg).run(jobs, out, "raft-scale-audit")
+        print(f"audit: {len(jobs)} Gemini calls; stage spend ${lg.spent:.4f} of ${lg.cap:.2f}")
+    v = {r["key"]: (r["json"] if r["ok"] else None) for r in jsonl(out)}
+    dis, n = Counter(), Counter()
+    for r in rows:
+        if r.get("task") == "extract_list":
+            continue
+        ok = accept(r, v.get(f"{r['cid']}|audit"))
+        if r["bucket"] == "B2":
+            ok = bool(ok) and v3_ok(v.get(f"{r['cid']}|gemini_v3"))
+        n[r["bucket"]] += 1
+        dis[r["bucket"]] += not ok
+    rep = {b: {"n": n[b], "disagree": dis[b], "rate": round(dis[b] / max(1, n[b]), 3)} for b in sorted(n)}
+    bad = [b for b, x in rep.items() if x["rate"] > AUDIT_MAX_DISAGREE]
+    (st / "audit_report.json").write_text(json.dumps({"by_bucket": rep, "over_limit": bad}, indent=2))
+    print(json.dumps(rep, indent=1))
+    print("audit: OK" if not bad else f"audit: buckets over {AUDIT_MAX_DISAGREE:.0%}: {bad} -> stop and report")
+
+
 def cmd_upload(args) -> None:
     """Upload the selected datasets to the Volume (raft/datasets/{stage}/)."""
     modal, _ = _modal()
@@ -653,7 +806,8 @@ def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict
             correct_A[g["id"]] = good
             proxy = bool(cites and verbatim and E.token_f1(p["answer"] or "", r["answer"] or "") >= 0.5)
             proxy_vs_j1[f"proxy_{int(proxy)}_j1_{int(good)}"] += 1
-    pairs = [r for r in rows.values() if r["bucket"] == "B1" and r.get("pair") in rows]
+    in_set = {g["id"] for g in gens}
+    pairs = [r for r in rows.values() if r["bucket"] == "B1" and r["id"] in in_set and r.get("pair") in in_set]
     paired = [correct_A.get(r["pair"], False) and refused.get(r["id"], False) for r in pairs]
     nA, nB = max(1, c["n_A"]), max(1, c["n_B"])
     return {"mode": mode, "n": n,
@@ -669,7 +823,15 @@ def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict
             "proxy_vs_j1_on_answered_A": dict(proxy_vs_j1)}
 
 
-def _eval_inputs() -> tuple[dict[str, dict], dict[str, list[dict]]]:
+def _eval_inputs(stage: str = "pilot-eval") -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    if stage == "scale":                    # 7.8: dev copy2 per curve point + test plain/copy2 of the best run
+        d = LOCAL / "scale" / "eval"
+        rows = {r["id"]: r for g in ("dev", "test") for r in jsonl(LOCAL / "scale" / "datasets" / f"{g}.jsonl")}
+        gens = {f.stem: jsonl(f) for f in sorted(d.glob("*.jsonl"))
+                if f.stem.startswith("test_") or f.stem.endswith("_copy2")}
+        if not gens:
+            raise SystemExit(f"no generations in {d}: run raft_gpu_app.py::full_check first")
+        return rows, gens
     rows = {r["id"]: r for r in jsonl(LOCAL / "pilot" / "datasets" / "dev.jsonl")}
     gens = {m: jsonl(EVAL_DIR / f"dev_gen_{m}.jsonl") for m in MODES if (EVAL_DIR / f"dev_gen_{m}.jsonl").exists()}
     if not (gens.get("plain") and gens.get("copy")):
@@ -686,7 +848,7 @@ def _reused(gens: dict[str, list[dict]]) -> dict[str, str]:
 def cmd_judge(args) -> None:
     need_confirm(args, "J1 judging (Gemini)")
     st, lg = sdir(args.stage), ledger(args.stage)
-    rows, gens = _eval_inputs()
+    rows, gens = _eval_inputs(args.stage)
     jobs = [j for j in judge_jobs(rows, gens) if j.key not in _reused(gens)]
     out = st / "j1.jsonl"
     gb = GeminiBatch(lg)
@@ -704,7 +866,7 @@ def cmd_judge(args) -> None:
 
 
 def cmd_score(args) -> None:
-    rows, gens = _eval_inputs()
+    rows, gens = _eval_inputs(args.stage)
     verdicts = {r["key"]: r["json"] for r in jsonl(sdir(args.stage) / "j1.jsonl") if r["ok"]}
     for k2, k1 in _reused(gens).items():                  # identical copy2 text: same verdict
         if k1 in verdicts:
@@ -729,7 +891,7 @@ def cmd_score(args) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("cmd", choices=("sources", "generate", "candidates", "assemble", "check", "report",
-                                   "select", "upload", "judge", "score"))
+                                   "select", "upload", "judge", "score", "audit"))
     p.add_argument("--stage", default="trial", choices=tuple(STAGE_CAP))
     p.add_argument("--n", type=int, default=150)
     p.add_argument("--plan", default="")
@@ -743,7 +905,8 @@ def main() -> None:
     t0 = time.time()
     {"sources": cmd_sources, "generate": cmd_generate, "candidates": cmd_candidates,
      "assemble": cmd_assemble, "check": cmd_check, "report": cmd_report,
-     "select": cmd_select, "upload": cmd_upload, "judge": cmd_judge, "score": cmd_score}[args.cmd](args)
+     "select": cmd_select_scale if args.stage == "scale" else cmd_select, "upload": cmd_upload,
+     "judge": cmd_judge, "score": cmd_score, "audit": cmd_audit}[args.cmd](args)
     print(f"[{args.cmd}] {time.time() - t0:.0f}s")
 
 

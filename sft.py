@@ -221,7 +221,8 @@ class RunConfig:
     lr: float = S.lr
     epochs: int = S.epochs
     replay_weight: float = S.replay_weight
-    keep: str = S.keep                 # 'final' (D-23) or 'best' dev macro-F1 epoch
+    keep: str = "final"                # 'final', 'best' (dev macro-F1) or 'select' (D-27: needs extra_eval with
+                                       # select_score + gate_ok; 7.8 passes config.SFT.keep)
     seq_len: int = config.SEQ_LEN
     batch_sequences: int = S.batch_sequences
     micro: int = S.micro_batch
@@ -248,6 +249,8 @@ def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train:
     """Train one run. With `out`, writes metrics/ckpt/ledger and resumes from out/ckpt.pt. Returns
     {'best': {...}, 'best_state': CPU state dict or None, 'status', 'steps', 'plan', 'history': every dev
     eval}. 'best' is the best dev macro-F1 epoch, or the final epoch with keep='final'. `extra_eval()` (optional) returns more metrics to merge into each dev eval."""
+    if cfg.keep == "select" and extra_eval is None:
+        raise ValueError("keep='select' needs extra_eval returning select_score and gate_ok")
     plan = make_plan(len(train), cfg.epochs, cfg.seq_len, cfg.batch_sequences, cfg.micro, cfg.sft_per_replay)
     order = StreamOrder(len(train), cfg.seed)
     end = min(plan.total_steps, cfg.max_steps) if cfg.max_steps else plan.total_steps
@@ -332,7 +335,16 @@ def train_one(cfg: RunConfig, raw: torch.nn.Module, net: torch.nn.Module, train:
                                                   if isinstance(v, float)))
             if out:
                 append_metrics(paths["metrics"], ev)
-            if ev["dev_macro_f1"] > best["dev_macro_f1"]:
+            if cfg.keep == "select":                   # D-27: proxy score among gate-passing evals
+                better = ev["gate_ok"] and (not best.get("gate_ok") or ev["select_score"] > best["select_score"])
+                if not best.get("gate_ok") and not ev["gate_ok"]:   # nothing passed yet: lowest bpb so far
+                    better = ev["heldout_pooled_bpb"] < best.get("heldout_pooled_bpb", math.inf)
+                if better:
+                    best = {**ev}
+                    best_state = {k: v.detach().to("cpu", copy=True) for k, v in raw.state_dict().items()}
+                    if out:
+                        atomic_torch_save(best_state, paths["best"])
+            elif ev["dev_macro_f1"] > best["dev_macro_f1"]:
                 best = {**ev}
                 best_state = {k: v.detach().to("cpu", copy=True) for k, v in raw.state_dict().items()}
                 if out:

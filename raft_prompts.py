@@ -43,6 +43,13 @@ passage to answer (same parties, subject and time period) but that it does NOT a
 for a specific detail the passage never states. The question must not be answerable by inference
 from the passage, and must not be about an obviously unrelated topic. Name the entity it concerns.
 
+Do NOT ask for a detail that the passage:
+- states anywhere, in any wording;
+- lets a reader compute by simple arithmetic from figures for the same item;
+- answers partially or qualitatively for the same item (e.g. "increased" when you ask by how much);
+and do NOT ask an underspecified question (an unnamed party, or two questions in one).
+Good near misses ask about a DIFFERENT year, entity, facility or metric than the one the passage gives.
+
 Reply with JSON only: {{"question": "...", "missing_detail": "..."}}, or {{"question": null}} if no
 such question is possible."""
 
@@ -62,8 +69,9 @@ Reply with JSON only: {{"instruction": "...", "response": "...", "quote": "..." 
 
 GEN_USER = 'Source: {source_desc}\n{hint}Passage:\n"""{passage}"""'
 # Item-1 type requested per G1 call, rotated per source (trial 7.3: 45% of questions were
-# number_or_date and only 10% rule_or_holding).
-TYPE_ROTATION = {"case-law": ("rule_or_holding", "party_or_entity", "fact", "yes_no"),
+# number_or_date and only 10% rule_or_holding; pilot 7.4: rule_or_holding still 6% of A, so 7.8
+# requests it twice per case-law rotation).
+TYPE_ROTATION = {"case-law": ("rule_or_holding", "party_or_entity", "rule_or_holding", "fact", "yes_no"),
                  "sec": ("number_or_date", "fact", "party_or_entity", "yes_no"),
                  "fineweb-edu": ("definition", "fact", "number_or_date")}
 
@@ -88,6 +96,17 @@ Using ONLY the passage below:
   ("supported"), and whether the response does what the instruction asks ("on_task").
 
 Reply with JSON only: {"yes_no": "Yes" or "No" or null, "supported": true or false or null, "on_task": true or false or null}"""
+
+V3_SYSTEM = """You check a question that is meant to be UNANSWERABLE from the passages below.
+Using ONLY the passages (no outside knowledge), could a careful reader give a plausible answer to
+the question? Count it as answerable if any passage:
+- states the answer, in any wording;
+- gives figures for the same item from which it follows by simple arithmetic;
+- gives a partial or qualitative answer for the same item;
+- answers a reasonable reading of the question (it names no party, or asks two things).
+A statement about a DIFFERENT year, entity, facility or metric does not count.
+
+Reply with JSON only: {"plausible_answer": true or false, "why": "..."}"""
 
 J1_SYSTEM = """You grade a small model's answer. Use ONLY the passages; ignore outside knowledge.
 - correct: the model's answer means the same as the reference answer. Missing the key fact, or
@@ -122,6 +141,11 @@ def v2_messages(k: int, passage: str, instruction: str, response: str | None) ->
     if response is not None:
         user += f"\nProposed response: {response}"
     return V2_SYSTEM, user
+
+
+def v3_messages(passages: list[str], question: str) -> tuple[str, str]:
+    body = passages_block(passages) if passages else "(no passages)"
+    return V3_SYSTEM, f"{body}\nQuestion: {question}"
 
 
 def j1_messages(passages: list[str], question: str, reference: str, model_answer: str) -> tuple[str, str]:

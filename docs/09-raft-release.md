@@ -97,5 +97,4 @@ strip of metric cards; a passages + question playground; "what this is").
 - an earlier model-card example didn't reproduce (two short passages; the model cited the wrong one). It
   was replaced with a 4-passage example whose real output, including one wrong answer, is printed in the card.
 
-**Still open:** the base model's HF card links the old API URL (`mdeepanshu2706--…`). Updating it is a
-separate Hub push, waiting for the user's yes.
+**Base model card updated (2026-10-23):** both links in the live `Deepanshu027/slm-125m-base` card now point to the new API URL (Hub commit `afc25c29`). Only those two strings changed. Verified from a fresh download and a 200 from the new `/docs`.

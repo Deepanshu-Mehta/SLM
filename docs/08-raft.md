@@ -1866,7 +1866,7 @@ of every generation and score are in `.smoke/raft/scale/`.
 - C-15: the 7.8b budget overrun of $0.07.
 
 **Code state:**
-- `smoke_raft.py --sft` passes in full (the count is recorded below once the final run finishes);
+- `smoke_raft.py --sft` passes **77/77** (2026-10-23), including bit-identical crash-and-resume, `keep='select'`, the τ rule, J1 scoring and copy-constrained decoding;
 - `raft_decode.py` is the single decoding implementation, shared by evaluation, the API and the HF repo;
 - no secrets in tracked files or in the 36 unpushed commits;
 - the largest tracked file is 124 KB.

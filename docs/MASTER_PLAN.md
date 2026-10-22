@@ -13,6 +13,7 @@ Last updated: 2026-10-16
 | 5 | Pretrain 125M (4 epochs) | **GPU H100×8** | **≤ $25.32 actual** of $50 cap | **DONE** — val 2.127 / ppl 8.39 / **0.657 bits/byte** |
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 (idle = $0) | **DONE**: model, API and website live |
 | 7 | Grounded SFT / RAFT (answer only from passages, refuse otherwise) | APIs + **GPU H100×1** | **≈ $14.70** (≈ $20 est.) | **DONE** 2026-10-21: `docs/08-raft.md` §13. Test: citation 0.90 / quote fidelity 1.00 / format 1.00 / over-refusal 0.05 met; grounded 0.32, hallucination 0.33, recall 0.78 missed |
+| 8 | Release SLM-125M-RAFT: HF model, `POST /answer`, website `/grounded` | Modal CPU, Vercel | $0 | **DONE** 2026-10-22: `docs/09-raft-release.md` |
 
 ---
 

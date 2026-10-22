@@ -3,7 +3,7 @@
 An append-only history. Each experiment records the question, the setup, the **measured** result
 and what it changed. Decisions are logged with their reasons so a later session doesn't re-open
 settled questions without new evidence. Corrections are logged so wrong numbers never come back.
-Full detail lives in `docs/NN-*.md`; current state is in [`PROJECT_STATE.md`](PROJECT_STATE.md).
+Full detail lives in `docs/NN-*.md`; the status table and execution log are in [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md).
 
 ## Experiments
 

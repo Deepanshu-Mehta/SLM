@@ -28,3 +28,9 @@ site_examples.py
 .DS_Store
 *.log
 .vercel/
+
+# Agent memory / instruction files: kept locally, never committed (user's rule, 2026-10-23)
+CLAUDE.md
+AGENT_BRIEF.md
+PROJECT_STATE.md
+.claude/

@@ -1,6 +1,16 @@
-# Phase 7: Grounded SFT / RAFT (plan)
+# Phase 7: Grounded SFT / RAFT (plan, then results)
 
-**Status: PLANNED, not executed.**
+**Status: DONE 2026-10-21. Released in Phase 8 (`docs/09-raft-release.md`).** §0–§12 are the plan as
+approved and are left as written. What actually happened, including every deviation, is in §13; the
+final review is at the end of §13.
+
+**Outcome in one table** (frozen 1,000-item test set, 20K model, τ 0.7, copy-constrained decoding):
+
+| Met | Missed |
+|---|---|
+| over-refusal 0.048 (≤ 0.20) · citation 0.903 (≥ 0.80) · quote fidelity 0.998 (≥ 0.90) · format 1.000 (≥ 0.99) · held-out bits/byte +0.009 (≤ +0.02) | grounded accuracy 0.316 (≥ 0.60) · hallucination 0.325 (≤ 0.15) · refusal recall 0.780 (≥ 0.80) |
+
+Spend ≈ $14.70 (plan ≈ $20).
 
 - **Written 2026-10-06; revised 2026-10-16** to the low-cost setup the user chose: DeepSeek Flash
   as the teacher, Gemini Flash as the independent checker, 10,000 training examples, ≈ $20.
@@ -665,7 +675,7 @@ learning-curve check in §3.1 (more data or not).
 | Data sent to DeepSeek is processed in China | Only public corpus text is ever sent |
 | 1,024-token context limits multi-passage reasoning | Out of scope; extending context to 2,048 is a separate option (a few dollars of continued pretraining) |
 
-## 12. Decisions needed from the user
+## 12. Decisions needed from the user (all resolved: D-16 to D-28)
 
 1. **Approve this plan** (DeepSeek Flash writer + Gemini Flash checker, 10K, ≈ $20).
 2. **Add `DEEPSEEK_API_KEY`** to `.env.local` before step 7.3.
@@ -1827,3 +1837,36 @@ of every generation and score are in `.smoke/raft/scale/`.
 
 **Next (proposed Phase 8, user-approved 2026-10-21):** publish the model to HF, add a grounded
 `/answer` endpoint to the Modal API, and add a RAFT section with a live demo to the website.
+
+### Final review of Phase 7 (2026-10-22, $0)
+**Reconciled against artifacts:**
+- every headline number in this doc, `EXPERIMENTS.md`, `PROJECT_STATE.md`, the HF card and the website
+  comes from `.smoke/raft/scale/headline.json`, `eval/report.json` and `select_report.json`;
+- spend sums to **$14.70**: 7.2 $0.19, 7.3 $0.55, 7.4 $1.81, 7.6–7.7 GPU $3.58, 7.7 J1 $0.23, 7.8 API $6.28,
+  7.8 GPU $2.07.
+
+**Deviations from the plan (§0–§12), each recorded where it was decided:**
+
+| Plan | What ran | Why | Record |
+|---|---|---|---|
+| 10K training examples | **20,340** | The pilot memorised (train 0.95 vs dev 0.23) | E-32, D-27 |
+| LR 1e-4, λ 0.25 | **LR 5e-5, λ 1.0** | Forgetting peaks mid-run; LR is the lever | E-28, E-29, D-23 |
+| Keep the best decision-F1 epoch | **Best dev proxy score under copy decoding, gated on bits/byte** | Decision-F1 ignores answer content, which overfits early | C-14, D-27 |
+| CaseHOLD −2 points as a gate | **Reported, not gated** (−4.8; limit recorded as missed) | The drop is noisier per-item scoring; the context margin is unchanged | E-30, D-23 |
+| Plain greedy decoding | **Copy-constrained** (verbatim quote, forced `Answer:` scaffold) | The model invented quotes | E-27, E-31, D-21, D-26 |
+| Near misses checked by V1 only | **+ V3 near-miss check** (and a manual read of dev/test) | Two agreeing checkers still passed answerable near misses | E-25, 7.8 |
+| One source passage per document | **Up to 4 per SEC filing** | Too few eligible SEC filings | E-33 |
+| — | **Rows quoting probe documents excluded** | Source exclusion was by passage, not document | E-34 |
+| — | **Answer-copy decoding tested, not adopted** | Below the pre-registered bar | E-36 |
+
+**Mistakes, all recorded as corrections:**
+- C-12: the projection rule for forgetting;
+- C-13: 7.7 called "$0";
+- C-14: the checkpoint rule and an unfounded 10K projection;
+- C-15: the 7.8b budget overrun of $0.07.
+
+**Code state:**
+- `smoke_raft.py --sft` passes in full (the count is recorded below once the final run finishes);
+- `raft_decode.py` is the single decoding implementation, shared by evaluation, the API and the HF repo;
+- no secrets in tracked files or in the 36 unpushed commits;
+- the largest tracked file is 124 KB.

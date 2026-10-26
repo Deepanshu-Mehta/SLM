@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import time
 from collections import Counter, defaultdict
@@ -36,13 +37,15 @@ T = config.TEACHER
 LOCAL = Path(".smoke/raft")
 STAGE_CAP = {"trial": "7.3-trial", "pilot": "7.4-pilot-data", "pilot-eval": "7.7-judge", "scale": "7.8-scale-data",
              "gemma": "9-judge",              # Phase 9 (docs/10-gemma.md): J1 on Gemma outputs, local files in .smoke/gemma
-             "slm500": "10-judge"}            # Phase 10 (docs/11-slm500m-raft.md): local files in .smoke/slm500m
+             "slm500": "10-judge",            # Phase 10 (docs/11-slm500m-raft.md): local files in .smoke/slm500m
+             "gemma3": "11-judge"}            # Phase 11 (docs/12-gemma3-270m.md): local files in .smoke/gemma3
 GEMMA_LOCAL = Path(".smoke/gemma")
 SLM500_LOCAL = Path(".smoke/slm500m")
+GEMMA3_LOCAL = Path(".smoke/gemma3")
 TRIAL_PLAN = {"G1": 2 / 3, "G2": 1 / 6, "G3": 1 / 6}
 GEMINI_MAX_TOKENS = 1_024              # Gemini counts thinking inside max_output_tokens
 GEMINI_CHECK_MAX_TOKENS = 384          # trial 7.3: check output+thoughts median 58, max 202 tokens
-GEMINI_CHUNK = 800                     # requests per batch: each worst-case reservation settles first
+GEMINI_CHUNK = int(os.environ.get("RAFT_GEMINI_CHUNK", 800))   # requests per batch: each worst-case reservation settles first
 CHECKERS = ("ds_off", "ds_on", "gemini", "ds_v3")
 DEVTEST_POOL = Path(".smoke/reports/source_pool_v2.jsonl")   # leak-scanned val sources (7.2 fix)
 
@@ -70,13 +73,14 @@ AUDIT_MAX_DISAGREE = 0.15
 
 
 def sdir(stage: str) -> Path:
-    d = {"gemma": GEMMA_LOCAL, "slm500": SLM500_LOCAL}.get(stage, LOCAL / stage)
+    d = {"gemma": GEMMA_LOCAL, "slm500": SLM500_LOCAL, "gemma3": GEMMA3_LOCAL}.get(stage, LOCAL / stage)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def ledger(stage: str) -> Ledger:
-    caps = {**config.RAFT_STAGE_CAPS_USD, **config.GEMMA_STAGE_CAPS_USD, **config.SLM500_STAGE_CAPS_USD}
+    caps = {**config.RAFT_STAGE_CAPS_USD, **config.GEMMA_STAGE_CAPS_USD, **config.SLM500_STAGE_CAPS_USD,
+            **config.GEMMA3_STAGE_CAPS_USD}
     return Ledger(sdir(stage) / "ledger.json", caps[STAGE_CAP[stage]])
 
 
@@ -884,9 +888,10 @@ def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict
 
 
 def _eval_inputs(stage: str = "pilot-eval") -> tuple[dict[str, dict], dict[str, list[dict]]]:
-    if stage in ("gemma", "slm500"):        # Phases 9-10: every copy2 output and every test output, keyed '{step}/{file}'
+    if stage in ("gemma", "slm500", "gemma3"):   # Phases 9-11: every copy2 output and every test output, keyed '{step}/{file}'
         rows = {r["id"]: r for g in ("dev", "test") for r in jsonl(LOCAL / "scale" / "datasets" / f"{g}.jsonl")}
-        root, dirs = (GEMMA_LOCAL, ("baselines", "pilot", "full")) if stage == "gemma" else (SLM500_LOCAL, ("pilot", "full", "control"))
+        root, dirs = {"gemma": (GEMMA_LOCAL, ("baselines", "pilot", "full")), "slm500": (SLM500_LOCAL, ("pilot", "full", "control")),
+                      "gemma3": (GEMMA3_LOCAL, ("pilot", "full", "lora_pilot", "lora_full"))}[stage]
         gens = {f"{f.parent.name}/{f.stem}": jsonl(f) for d in dirs
                 for f in sorted((root / d).glob("*.jsonl"))
                 if f.stem.endswith("_copy2") or f.stem.startswith("test_")}
@@ -925,6 +930,8 @@ def cmd_judge(args) -> None:
     jobs = [j for j in judge_jobs(rows, gens) if j.key not in _reused(gens)]
     if args.stage == "gemma":
         jobs += closed_book_jobs(rows)
+    if args.stage == "gemma3":
+        jobs += closed_book_jobs(rows, GEMMA3_LOCAL / "probe" / "closed_book_base.jsonl")
     out = st / "j1.jsonl"
     done = {r["key"] for r in jsonl(out) if r["ok"]}       # Phase 9 judges in rounds (pilot, then full)
     jobs = [j for j in jobs if j.key not in done]
@@ -945,11 +952,11 @@ def cmd_judge(args) -> None:
 CLOSED_BOOK = GEMMA_LOCAL / "baselines" / "closed_book_test_A.jsonl"
 
 
-def closed_book_jobs(rows: dict[str, dict]) -> list[Job]:
+def closed_book_jobs(rows: dict[str, dict], path: Path | None = None) -> list[Job]:
     """Phase 9 closed-book probe: gemma-2-2b-it answered the test A questions without passages; J1
     grades `correct` against the reference (with the passages shown to the judge, as always)."""
     jobs = []
-    for g in jsonl(CLOSED_BOOK):
+    for g in jsonl(path or CLOSED_BOOK):
         r = rows[g["id"]]
         system, user = P.j1_messages(r["passages"] or [], r["question"], r["answer"], g["answer"])
         jobs.append(Job(f"{g['id']}|closed_book", system, user, GEMINI_CHECK_MAX_TOKENS))
@@ -965,10 +972,18 @@ def cmd_score(args) -> None:
     judged = {j.key for j in judge_jobs(rows, gens)}
     print(f"J1 verdicts for {len(judged & set(verdicts))} of {len(judged)} judged outputs")
     rep = {m: score_eval(rows, gens[m], verdicts, m) for m in gens}
-    if args.stage == "gemma" and CLOSED_BOOK.exists():     # grounded accuracy without the closed-book-known items
+    for m in gens:                          # missing verdicts count as wrong: record coverage so partial sets are never read
+        need = [j.key for j in judge_jobs(rows, {m: gens[m]})]
+        rep[m]["j1_coverage"] = sum(k in verdicts for k in need) / max(1, len(need))
+    cb_path = {"gemma": CLOSED_BOOK, "gemma3": GEMMA3_LOCAL / "probe" / "closed_book_base.jsonl"}.get(args.stage)
+    if cb_path is not None and cb_path.exists():     # grounded accuracy without the closed-book-known items
         known = {k.split("|")[0] for k, v in verdicts.items() if k.endswith("|closed_book") and v.get("correct")}
         n_cb = sum(k.endswith("|closed_book") for k in verdicts)
-        rep["closed_book"] = {"judged": n_cb, "correct": len(known), "rate": len(known) / max(1, n_cb)}
+        yn = {i for i in {k.split("|")[0] for k in verdicts if k.endswith("|closed_book")}
+              if rows[i]["answer"].strip().rstrip(".").lower() in ("yes", "no")}
+        rep["closed_book"] = {"judged": n_cb, "correct": len(known), "rate": len(known) / max(1, n_cb),
+                              "yes_no_items": len(yn), "correct_excluding_yes_no": len(known - yn),
+                              "rate_excluding_yes_no": len(known - yn) / max(1, n_cb - len(yn))}
         for m in [m for m in gens if m.split("/")[-1].startswith("test_")]:
             unknown = [g for g in gens[m] if not (rows[g["id"]]["bucket"] == "A" and g["id"] in known)]
             rep[m]["grounded_accuracy_closed_book_unknown"] = score_eval(rows, unknown, verdicts, m)["grounded_accuracy"]
@@ -980,7 +995,8 @@ def cmd_score(args) -> None:
     for m in gens:
         if m not in rep:
             continue
-        print(f"[{m}]")
+        cov = rep[m]["j1_coverage"]
+        print(f"[{m}]" + ("" if cov == 1 else f"  ** INCOMPLETE: J1 verdicts for {cov:.0%} of judged outputs; numbers below are NOT valid **"))
         for k, (op, t) in targets.items():
             v = rep[m][k]
             ok = v <= t if op == "<=" else v >= t

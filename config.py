@@ -413,6 +413,43 @@ SLM500_STAGE_CAPS_USD: Mapping[str, float] = {
     "10-judge": 1.5,
 }
 
+# ---- Phase 11: RAFT on Gemma 3 270M (docs/12-gemma3-270m.md) -------------------------------
+GEMMA3_DIR = f"{DATA_ROOT}/gemma3"
+
+
+@dataclass(frozen=True)
+class Gemma3Config:
+    """Full fine-tuning of google/gemma-3-270m on the RAFT rows (docs/12-gemma3-270m.md §3)."""
+
+    base: str = "google/gemma-3-270m"
+    base_revision: str = "9b0cfec892e2bc2afd938c98eabe4e4a7b1e0ca1"     # pinned 2026-10-27 (bf16, 0.54 GB)
+    transformers: str = "4.57.6"        # gemma3_text needs >= 4.55; its own image and local venv (.venv-g3)
+    attn: str = "eager"                 # Gemma 3 recommends eager for training; no soft-cap, so SDPA would also do
+    pilot_lrs: tuple[float, ...] = (2e-5, 5e-5)     # the 500M's and SLM-125M's full fine-tuning LRs (11.3: gate failed)
+    lora_lrs: tuple[float, ...] = (1e-4, 3e-5)      # D-34: LoRA as Gemma 2B (config.GEMMA r 32, all linear, embeddings frozen)
+    peft: str = "0.17.1"
+    lora_step_s: float = 0.50           # conservative: LoRA backward skips the weight gradients
+    pilot_size: int = 5_000
+    pilot_evals: int = 2                # 11.2: 4 would put the phase 37% over its quote; 2 as Phase 9's pilot
+    full_size: int = 20_000
+    full_evals: int = 8                 # as SLM-125M's and the 500M's 20K runs
+    micro_tokens: int = 32_768          # 11.2: 31.9K padded tokens -> 0.41 s fwd+bwd+opt, peak 53.7 GB
+    gpu: str = "H100"
+    # measured by the 11.2 probe (0 = not yet; 11.3/11.4 refuse to start)
+    probe_step_s: float = 0.50          # ~36K padded tokens per step at 1.27e-5 s/token
+    probe_eval_s: float = 60.0          # dev copy2 generation ~45 s + bits/byte ~8 s + teacher-forced ~2 s
+
+
+GEMMA3 = Gemma3Config()
+
+GEMMA3_STAGE_CAPS_USD: Mapping[str, float] = {
+    "11.2-probe": 0.4,
+    "11.3-pilot": 2.0,                  # full fine-tuning: spent $0.81, gate failed at both LRs
+    "11.3b-lora-pilot": 1.2,            # D-34
+    "11.4-full": 2.5,
+    "11-judge": 1.0,
+}
+
 STAGES: tuple[str, ...] = (
     "setup", "clean", "dedup", "tokenizer", "tokenize", "pretrain", "deploy", "sft",
 )

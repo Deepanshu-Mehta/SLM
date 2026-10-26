@@ -34,3 +34,4 @@ CLAUDE.md
 AGENT_BRIEF.md
 PROJECT_STATE.md
 .claude/
+.venv-g3/

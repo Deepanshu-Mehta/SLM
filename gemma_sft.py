@@ -82,10 +82,11 @@ def pad_batch(seqs: list[np.ndarray], plens: list[int], pad_id: int) -> tuple[to
 
 
 # ------------------------------------------------------------------------------ model
-def load_base(path: str, device: torch.device, attn: str = G.attn) -> torch.nn.Module:
-    """Gemma 2 in bf16: the frozen base for LoRA (docs/10-gemma.md §2; not the 125M fp32 recipe)."""
+def load_base(path: str, device: torch.device, attn: str = G.attn, dtype: torch.dtype = torch.bfloat16) -> torch.nn.Module:
+    """Gemma 2 in bf16: the frozen base for LoRA (docs/10-gemma.md §2; not the 125M fp32 recipe).
+    Phase 11 (Gemma 3 270M, full fine-tuning): dtype=float32 master weights + bf16 autocast."""
     from transformers import AutoModelForCausalLM
-    net = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16, attn_implementation=attn)
+    net = AutoModelForCausalLM.from_pretrained(path, torch_dtype=dtype, attn_implementation=attn)
     return net.to(device)
 
 
@@ -111,6 +112,24 @@ def load_adapter(pm, state: dict) -> None:
     res = set_peft_model_state_dict(pm, state)
     if getattr(res, "unexpected_keys", None):
         raise RuntimeError(f"adapter state has unexpected keys: {res.unexpected_keys[:4]}")
+
+
+def is_peft(net) -> bool:
+    return hasattr(net, "peft_config")
+
+
+def trainable_state(net) -> dict:
+    """What a run changes: the adapter (LoRA) or every weight (full fine-tuning, Phase 11)."""
+    if is_peft(net):
+        return adapter_state(net)
+    return {k: v.detach().to("cpu", copy=True) for k, v in net.state_dict().items()}
+
+
+def load_trainable(net, state: dict) -> None:
+    if is_peft(net):
+        load_adapter(net, state)
+    else:
+        net.load_state_dict(state)
 
 
 def causal_lm(net):
@@ -248,12 +267,14 @@ def better(ev: dict, best: dict) -> bool:
 
 def train_run(pm, init_state: dict, train: GemmaData, dev: GemmaData, dec: dict, device: torch.device, *,
               lr: float, epochs: int = G.epochs, n_evals: int, extra_eval, micro: int = G.micro_batch,
-              seed: int = G.seed, budget_ok=lambda: True, log=print, grad_ckpt: bool = False) -> dict:
-    """One LoRA run from `init_state`. `extra_eval()` must return select_score, gate_ok and
-    heldout_pooled_bpb (bits/byte gate + copy2 proxy). Returns {'status', 'steps', 'best', 'best_state'
-    (adapter only), 'plan', 'history'}."""
+              seed: int = G.seed, budget_ok=lambda: True, log=print, grad_ckpt: bool = False,
+              micro_tokens: int = G.micro_tokens) -> dict:
+    """One run from `init_state`: LoRA (a PEFT model, Phase 9) or full fine-tuning (a plain model, Phase 11;
+    AdamW weight decay config.SFT.weight_decay on matrices, as train.build_optimizer). `extra_eval()` must
+    return select_score, gate_ok and heldout_pooled_bpb (bits/byte gate + copy2 proxy). Returns {'status',
+    'steps', 'best', 'best_state' (adapter or full state), 'plan', 'history'}."""
     from train import autocast
-    load_adapter(pm, init_state)
+    load_trainable(pm, init_state)
     if grad_ckpt:
         pm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         pm.enable_input_require_grads()
@@ -261,11 +282,14 @@ def train_run(pm, init_state: dict, train: GemmaData, dev: GemmaData, dec: dict,
     order = StreamOrder(len(train), seed)
     eval_every = max(1, round(plan.total_steps / n_evals))
     params = [p for p in pm.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=lr, betas=(config.TRAIN.beta1, config.TRAIN.beta2), eps=1e-8,
-                            weight_decay=G.weight_decay, **({"fused": True} if device.type == "cuda" else {}))
+    groups = ([{"params": params, "weight_decay": G.weight_decay}] if is_peft(pm) else
+              [{"params": [p for p in params if p.dim() >= 2], "weight_decay": S.weight_decay},
+               {"params": [p for p in params if p.dim() < 2], "weight_decay": 0.0}])
+    opt = torch.optim.AdamW(groups, lr=lr, betas=(config.TRAIN.beta1, config.TRAIN.beta2), eps=1e-8,
+                            **({"fused": True} if device.type == "cuda" else {}))
     best, best_state, history, status = {"step": 0}, None, [], "completed"
     log(f"[plan] steps {plan.total_steps} ({plan.steps_per_epoch}/epoch), {plan.sft_per_step} rows/step in "
-        f"micro-batches of <= {G.micro_tokens} padded tokens, "
+        f"micro-batches of <= {micro_tokens} padded tokens, "
         f"eval every {eval_every}, lr {lr:g}, trainable {sum(p.numel() for p in params):,}")
     pm.train()
     t0, toks = time.time(), 0
@@ -274,7 +298,7 @@ def train_run(pm, init_state: dict, train: GemmaData, dev: GemmaData, dec: dict,
         for g in opt.param_groups:
             g["lr"] = cur
         parts = [([train.seqs[i] for i in idx], train.plen[idx].tolist())
-                 for idx in step_micros(order, train, plan, step)]
+                 for idx in step_micros(order, train, plan, step, micro_tokens)]
         n_tok = sum(int(len(s) - p) for seqs, ps in parts for s, p in zip(seqs, ps))
         acc = {"sft": 0.0, "dec_ce": 0.0, "dec_ok": 0, "n": 0}
         for seqs, ps in parts:
@@ -312,7 +336,7 @@ def train_run(pm, init_state: dict, train: GemmaData, dev: GemmaData, dec: dict,
             history.append(ev)
             log(f"[eval] step {done} " + " ".join(f"{k} {v:.4f}" for k, v in ev.items() if isinstance(v, float)))
             if better(ev, best):
-                best, best_state = {**ev}, adapter_state(pm)
+                best, best_state = {**ev}, trainable_state(pm)
     if grad_ckpt:
         pm.gradient_checkpointing_disable()
     return {"status": status, "steps": plan.total_steps, "best": best, "best_state": best_state,

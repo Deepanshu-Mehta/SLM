@@ -3,8 +3,9 @@
 A **125.8M-parameter** Llama-style language model trained from scratch, with a fresh tokenizer and
 fresh weights, on US court opinions, SEC filings and educational web text. A grounded fine-tune of it
 (**SLM-125M-RAFT**) then learned to answer **only from passages it is given**: it names the passage,
-quotes it word for word and answers, or refuses. Everything runs on [Modal](https://modal.com), and
-every number below comes from a run artifact.
+quotes it word for word and answers, or refuses. A scale study then put the same grounded-QA training
+on three other models to separate **model size** from **pretraining scale** (Part 3). Everything runs on
+[Modal](https://modal.com), and every number below comes from a run artifact.
 
 | | **SLM-125M (base)** | **SLM-125M-RAFT (grounded)** |
 |---|---|---|
@@ -178,6 +179,54 @@ Targets were set before any training and were not lowered afterwards. Answers we
 
 ---
 
+## Part 3: what scale buys (the same grounded-QA training on other models)
+
+SLM-125M-RAFT cites the right passage 90% of the time but reads the right answer out of it only a third of
+the time. To find out whether that is the data or the model, the **same 20,340 training rows, the same frozen
+1,000-item test set and the same judge** were used on three more models. They were chosen so that size and
+pretraining change one at a time.
+
+| Test (judged, copy-constrained decoding) | Target | **SLM-125M** (ours) | **SLM-500M** (same corpus) | **Gemma 3 270M** | **Gemma 2 2B** |
+|---|---|---|---|---|---|
+| Parameters (outside the embeddings) | | 126M (113M) | 518M (476M) | 268M (100M) | 2.6B (2.0B) |
+| Pretraining | | 2.0B tokens × 4 epochs, our corpus | 2.2B × ~5, the same three sources | ~6T tokens, general | ~2T tokens, general |
+| Fine-tuning (rows) | | full + replay (20K) | full + replay (20K) | full (20K) | LoRA r 32 (5K) |
+| Grounded accuracy | ≥ 60% | 31.6% ❌ | 34.6% ❌ | **64.4%** ✅ | **91.2%** ✅ |
+| Hallucination | ≤ 15% | 32.5% ❌ | 30.7% ❌ | 20.1% ❌ | **8.6%** ✅ |
+| Refusal recall (near misses) | ≥ 80% | 78.0% (56%) ❌ | 75.0% (47%) ❌ | 89.0% (79%) ✅ | 90.0% (76%) ✅ |
+| Citation / verbatim quote / format | | 90.3 / 99.8 / 100% | 89.5 / 99.8 / 100% | 97.3 / 98.2 / 99.9% | 98.0 / 99.1 / 99.3% |
+| Held-out bits/byte change (≤ +0.02) | | +0.009 ✅ | +0.018 ✅ | **+0.308** ❌ | +0.020 ✅ |
+| CaseHOLD change (reported) | | −4.8 | −1.5 | −9.6 | −0.1 |
+
+**What it shows:**
+- **4× the parameters on the same ≈ 2B-token corpus barely helps:** +3 points grounded accuracy (about one
+  standard error).
+- **About the same size with ≈ 750× more pretraining doubles it:** Gemma 3 270M has 100M parameters outside
+  its embeddings (ours: 113M) and gains +33 points. The rule fixed before the run said ≥ 60% means
+  "pretraining scale is the lever even at this size".
+- **Reading comes from pretraining; fine-tuning mostly teaches refusing.** Gemma 2 2B, instruction-tuned
+  and with no fine-tuning, already scores 83.8% grounded. But it refuses only 25% of unanswerable
+  questions (3% of near misses). LoRA on 5,000 of our rows took refusal recall to 90% and hallucination to
+  8.6%.
+- **The data and labels are sound:** Gemma 2 2B meets all seven targets on our rows.
+- **Forgetting is the price of adapting a general model.** No tested Gemma 3 setting kept its held-out
+  bits/byte within +0.02, so its result is reported with that miss. Gemma 2 2B passed only at a low LoRA
+  learning rate.
+- **Fair test:**
+  - The 500M's pipeline splits validation by window, so it probably saw our test documents. Measured
+    against text neither model saw, it showed no extra familiarity, and it answered under 1% of test
+    questions with no passages.
+  - The Gemma models' closed-book accuracy is small: excluding those items barely changes their scores.
+- **Copy-constrained decoding:** it rescues small models' quotes (39% → 99.8% verbatim for ours). Models
+  that already quote well score a few points higher without it.
+
+Write-ups: [`docs/10-gemma.md`](docs/10-gemma.md) (Gemma 2 2B),
+[`docs/11-slm500m-raft.md`](docs/11-slm500m-raft.md) (500M, overlap checks),
+[`docs/12-gemma3-270m.md`](docs/12-gemma3-270m.md) (Gemma 3 270M). None of these models is published from
+this project.
+
+---
+
 ## Reproduce
 
 **Prerequisites:**
@@ -243,6 +292,27 @@ python publish_raft.py card && python publish_raft.py upload && python publish_r
 - **Spend guards:** the teacher stages charge a per-stage spend ledger, capped by
   `config.RAFT_STAGE_CAPS_USD`, and refuse DeepSeek's peak-price hours.
 
+### Part 3 (the scale study): every GPU step needs `--confirm` and stays under its stage cap
+
+```bash
+# Gemma 2 2B (LoRA): weights, probe, baselines, pilot, the 5K test pass
+modal run gemma_app.py::fetch_check
+modal run --detach gemma_app.py::probe_check --confirm --max-usd 0.5
+modal run --detach gemma_app.py::pilot_check --confirm --low-lr --max-usd 1.8
+modal run --detach gemma_app.py::test5k_check --confirm --max-usd 0.98
+# The 500M (same corpus): weights, replay store, probe, pilot, 20K; then the overlap test (local CPU)
+modal run slm500_app.py::fetch_check && modal run slm500_app.py::replay_check --model base500
+modal run --detach slm500_app.py::pilot_check --confirm && modal run --detach slm500_app.py::full_check --confirm --lr 2e-5
+python membership_check.py --n 200
+# Gemma 3 270M (full fine-tuning; needs transformers >= 4.55: .venv-g3 for local checks)
+modal run gemma3_app.py::fetch_check
+modal run --detach gemma3_app.py::pilot_check --confirm && modal run --detach gemma3_app.py::full_check --confirm --lr 2e-5
+# judging (Gemini batch): stage gemma | slm500 | gemma3
+python raft_pipeline.py judge --stage gemma3 --confirm && python raft_pipeline.py score --stage gemma3
+```
+- **Keep the laptop awake** (`caffeinate -i`). Idle sleep makes Modal cancel a running job after about
+  two minutes, even with `--detach`.
+
 ## Repository layout
 
 | Path | Role |
@@ -256,9 +326,12 @@ python publish_raft.py card && python publish_raft.py upload && python publish_r
 | `raft_app.py` | Phase 7 on Modal CPU: passage pools, leakage scan, BM25, context assembly (one worker per shard) |
 | `raft_data.py`, `raft_prompts.py`, `teacher.py`, `raft_pipeline.py` | Teacher data: format, prompts, DeepSeek/Gemini clients with spend ledgers, stage pipeline, J1 judging and scoring |
 | `sft.py`, `eval_raft.py`, `eval_forgetting.py`, `raft_gpu_app.py`, `smoke_raft.py` | Grounded SFT trainer, evaluation, forgetting guards, GPU jobs, local checks |
-| `raft_decode.py`, `publish_raft.py` | Shared grounded decoding (eval + API + HF) and the SLM-125M-RAFT release |
+| `raft_decode.py`, `publish_raft.py` | Shared grounded decoding (eval + API + HF; SLM and Gemma prompt formats) and the SLM-125M-RAFT release |
+| `gemma_sft.py`, `gemma_app.py`, `smoke_gemma.py` | Part 3, Gemma 2 2B: trainer (LoRA or full fine-tuning; logits only at target positions for the 256K vocabulary), Modal jobs, local checks |
+| `slm500_app.py`, `smoke_slm500.py`, `membership_check.py` | Part 3, the 500M: RAFT jobs (replay re-tokenized from our corpus), local checks, the train/test overlap test |
+| `gemma3_app.py`, `smoke_gemma3.py` | Part 3, Gemma 3 270M: Modal jobs (transformers 4.57.6, separate venv `.venv-g3`), local checks |
 | `migrate_app.py` | One-off: copied the Modal Volume to a new Modal account (volume to volume) |
-| `docs/` | `MASTER_PLAN.md`, one document per phase with measured results (`08-raft.md` = Phase 7, `09-raft-release.md` = Phase 8) |
+| `docs/` | `MASTER_PLAN.md`, one document per phase with measured results (`08-raft.md` = Phase 7, `09-raft-release.md` = Phase 8, `10`–`12` = the scale study) |
 | `EXPERIMENTS.md` | Experiment / decision / correction log (the E-, D- and C- IDs the docs cite) |
 | `GUIDE.md`, `INITIAL.md` | The original specifications |
 
@@ -281,6 +354,11 @@ The website's source is not in this repository; the live site is linked above.
   answer/refuse decision.
 - **Copy-constrained decoding is free and decisive for faithfulness** (verbatim quotes 39% → 99.8%). It
   cannot fix a wrong span.
+- **Pre-registered readings.** Every comparison had its decision rule written down before the run. When a
+  forgetting gate failed, the run stopped and the choice (lower LR, LoRA, or report it) was made explicitly
+  and logged (`EXPERIMENTS.md` D-30–D-35).
+- **Judging with a partial set of verdicts is wrong, not low.** A missing verdict counts against the model, so
+  `raft_pipeline.py score` records `j1_coverage`, and incomplete sets are never reported.
 
 ## Limitations
 
@@ -292,6 +370,8 @@ The website's source is not in this repository; the live site is linked above.
   - weak on near-miss questions;
   - limited to 4 passages of about 160 tokens by the 1,024-token context.
 - **No preference or safety tuning.**
+- **Scale study:** one seed per setting. Gemma 2 2B was tested at 5K rows (it met every target there).
+  Gemma 3 270M's forgetting gate was not met. Gemma models carry Google's Gemma terms.
 
 ## License
 

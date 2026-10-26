@@ -565,6 +565,22 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Control** (the author's 125M, LR 5e-5): no eval passed the gate (+0.026 to +0.043), and the fallback
   kept step 144. **Not interpretable**: the gate windows are probably its training text.
 
+### E-43 · Phase 11: Gemma 3 270M on the same grounded data (2026-10-27; GPU $3.86, J1 $0.89)
+- **Probe:** 268M parameters (100M outside the embeddings); 32K-token micro-batch 0.41 s / 53.7 GB.
+  - Base held-out bits/byte 0.813 (SLM-125M ≈ 0.71 on the same windows).
+  - Closed-book (J1): 1.6% correct excluding Yes/No.
+- **5K pilots:**
+  - full fine-tuning LR 2e-5 / 5e-5: dev J1 grounded 0.542 / 0.524, but bits/byte +0.149 / +0.296;
+  - LoRA LR 1e-4 / 3e-5: bits/byte +0.069 / +0.037, proxy grounded 0.29 / 0.23.
+  - **No setting passes +0.02** (D-34, D-35).
+- **20K full fine-tuning LR 2e-5** (gate reported): selected step 1,008; test AUROC 0.971.
+  - **Test `copy2`:** grounded **0.644**, hallucination 0.201, recall 0.890 (B2 0.79), citation 0.973,
+    quote fidelity 0.982, format 0.999: 6 of 7 targets.
+  - Bits/byte **+0.308**; CaseHOLD **−9.6**.
+- **Pre-registered reading:** ≥ 0.60, so pretraining scale is the lever even at ≈ our size.
+  - 4× parameters on our corpus: +0.03;
+  - ≈ 750× pretraining at about our size: +0.33.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

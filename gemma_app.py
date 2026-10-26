@@ -467,8 +467,8 @@ def _lora_runs(max_usd: float, which: str, runs: list[dict]) -> dict:
 
 
 @app.function(image=image, gpu=G.gpu, volumes=VOLUMES, cpu=8.0, memory=65_536, timeout=60 * 90)
-def pilot(max_usd: float) -> dict:
-    return _lora_runs(max_usd, "pilot", [{"n": G.pilot_size, "lr": lr, "evals": G.pilot_evals} for lr in G.pilot_lrs])
+def pilot(max_usd: float, lrs: tuple[float, ...] = G.pilot_lrs) -> dict:
+    return _lora_runs(max_usd, "pilot", [{"n": G.pilot_size, "lr": lr, "evals": G.pilot_evals} for lr in lrs])
 
 
 @app.function(image=image, gpu=G.gpu, volumes=VOLUMES, cpu=8.0, memory=65_536, timeout=60 * 150)
@@ -477,18 +477,18 @@ def full(max_usd: float, lr: float) -> dict:
 
 
 @app.local_entrypoint()
-def pilot_check(confirm: bool = False, max_usd: float = 3.0):
-    """9.4 (paid: 1 x H100). Requires --confirm."""
-    _gate(confirm, max_usd, "9.4-pilot")
-    _report("pilot", pilot.remote(max_usd))
+def pilot_check(confirm: bool = False, max_usd: float = 3.0, low_lr: bool = False):
+    """9.4 (paid: 1 x H100). Requires --confirm. --low-lr: 9.4b, the D-31 arm(s) config.GEMMA.low_lrs."""
+    _gate(confirm, max_usd, "9.4b-low-lr" if low_lr else "9.4-pilot")
+    _report("pilot", pilot.remote(max_usd, G.low_lrs if low_lr else G.pilot_lrs))
 
 
 @app.local_entrypoint()
 def full_check(confirm: bool = False, lr: float = 0.0, max_usd: float = 6.0):
     """9.5 (paid: 1 x H100). Requires --confirm and the LR picked by the 9.4 rule."""
     _gate(confirm, max_usd, "9.5-full")
-    if lr not in G.pilot_lrs:
-        raise SystemExit(f"--lr must be one of the pilot LRs {G.pilot_lrs} (the 9.4 pre-registered pick)")
+    if lr not in G.pilot_lrs + G.low_lrs:
+        raise SystemExit(f"--lr must be one of the pilot LRs {G.pilot_lrs + G.low_lrs} (the 9.4 pre-registered pick)")
     _report("full", full.remote(max_usd, lr))
 
 

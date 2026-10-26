@@ -499,6 +499,13 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   corpus grows with LR and steps and does not recover as the LR anneals (unlike E-28).
 - Detail: `docs/10-gemma.md` §8.
 
+### E-38 · 9.4b Gemma LoRA at LR 3e-5, 5K (2026-10-26; GPU $1.81, J1 $0.11)
+- Held-out bits/byte +0.016 (step 146) / **+0.0198 (step 291): the gate passes.**
+- Dev J1 (τ 0.75): grounded **0.924**, hallucination **0.042**, refusal recall 0.911 (B2 0.78), over-refusal 0.004,
+  citation 0.985, quote fidelity 0.997, format 0.998: all seven targets met.
+- Across LRs 3e-5 / 1e-4 / 3e-4, grounded accuracy barely moves (0.92 / 0.90 / 0.95), while forgetting
+  grows 4–8×. LR 3e-5 is the pre-registered pick (the only gate-passing arm).
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -533,6 +540,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-28 | 10-21 | Close Phase 7 with the 7.8 test numbers as the record (3 of 7 gated targets missed); the user approves Phase 8: publish the SFT model, a grounded API endpoint and a website section | E-35/E-36: the remaining gap is reading comprehension at 125M; neither more data (≈ +0.045 per doubling) nor decoding constraints close it cheaply |
 | D-29 | 10-22 | Phase 8 release: public HF repo `slm-125m-raft` (card and examples from artifacts, failures shown); `POST /answer` on the existing scale-to-zero Modal app; `/grounded` page on the existing site. One decoding implementation (`raft_decode.py`) everywhere | The user asked to publish and add the model to the site with a visual explanation. Serving what was evaluated, and showing the misses, keeps the claims honest |
 | D-30 | 10-26 | Phase 9: Gemma 2 2B trained on the same 20,340 RAFT rows with **LoRA only** (bf16 base, r 32, α 32, all linear layers; LRs 1e-4 / 3e-4 at 5K, then 20K). No QLoRA (memory not a constraint; it would add a 4-bit confound); quantization measured at inference only, later. Full fine-tuning control, Gemma 3 270M and best-of-8 deferred. 52 SFT rows per step (Phase 7's SFT share), no replay | The user chose "gemma2B raft using lora". The comparison asks whether the 125M gap is data or model size; the reading of the result is pre-registered in `docs/10-gemma.md` §1 |
+| D-31 | 10-26 | Gemma LoRA failed the +0.02 bits/byte gate at both pilot LRs (E-37). **Keep the gate** and run one more 5K LoRA arm at LR 3e-5 (9.4b, cap $1.60) before deciding on test / 20K | The user chose "lower LR first" over reporting bits/byte ungated. Phase 7 found LR to be the bits/byte lever (E-28) |
 
 ## Corrections log
 

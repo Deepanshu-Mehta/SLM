@@ -338,6 +338,7 @@ class GemmaConfig:
     lora_dropout: float = 0.0
     lora_targets: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     pilot_lrs: tuple[float, ...] = (1e-4, 3e-4)
+    low_lrs: tuple[float, ...] = (3e-5,)  # 9.4b (D-31): keep the gate; does a lower LR pass it at 5K?
     pilot_size: int = 5_000             # the same select_mix draw as Phase 7's 5K curve point
     pilot_evals: int = 2
     full_size: int = 20_000             # as 7.8 (select_mix(20,000, 0.35) from the 20,340-row pool)
@@ -357,7 +358,7 @@ class GemmaConfig:
     # micro_batch (5.88e-5 s/token x 36.0K padded tokens per length-grouped step), and seconds per in-training
     # eval (teacher-forced dev 10 s + held-out bits/byte 28 s + dev copy2 generation <= 145 s; upper bound)
     probe_step_s: float = 2.12
-    probe_eval_s: float = 183.0
+    probe_eval_s: float = 150.0         # 9.4 measured ~150 s per in-training eval (the probe's 183 was an upper bound)
 
 
 GEMMA = GemmaConfig()
@@ -367,6 +368,7 @@ GEMMA_STAGE_CAPS_USD: Mapping[str, float] = {
     "9.2-probe": 0.5,                   # spent $0.15
     "9.3-baselines": 1.0,
     "9.4-pilot": 3.6,                   # re-derived from the 9.2 probe (was 3.0); pending approval
+    "9.4b-low-lr": 1.8,                 # D-31: one 5K arm at LR 3e-5 (quoted ≈ $1.3; 9.4 measured ≈ $1.5 per arm)
     "9.5-full": 5.8,                    # re-derived from the 9.2 probe (was 6.0)
     "9-judge": 2.0,
 }

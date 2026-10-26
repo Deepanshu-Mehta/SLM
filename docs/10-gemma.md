@@ -436,3 +436,30 @@ eval passed the gate):**
 - **The forgetting gate fails, and grows with LR and with steps.** The held-out loss rose 7–13% at the
   selected checkpoints, and it did not recover as the LR annealed (unlike SLM-125M, E-28).
 - **Pre-registered rule (§4, 9.4): no arm passes the gate, so stop and bring it back** (D-31 pending).
+
+### 9.4b Lower LR, gate kept (D-31): DONE, gate PASSED (2026-10-26; GPU $1.81 of $1.80; J1 $0.11)
+**Run notes:**
+- The first launch stopped itself before training ($0.09): its estimate used the probe's worst-case eval
+  time (183 s).
+- `probe_eval_s` was recalibrated to the measured 150 s and the cap raised from $1.60 to $1.80 (9.4
+  measured ≈ $1.5 per arm, against the ≈ $1.3 quoted).
+- The run cost $1.72, so the stage total is $1.81, $0.01 over its cap. 0 containers afterwards.
+
+**LoRA LR 3e-5, 5K, dev:**
+
+| | Target | step 146 | **step 291 (selected)** |
+|---|---|---|---|
+| Held-out bits/byte | ≤ +0.02 | +0.0162 ✅ | **+0.0198** ✅ |
+| Proxy selection score | | 0.781 | 0.839 |
+
+**J1 on the selected checkpoint (τ 0.75):**
+- **grounded 0.924**, hallucination **0.042**;
+- refusal recall 0.911 (B1 0.96 / B2 0.78 / B3 1.00), over-refusal 0.004;
+- citation 0.985, quote fidelity 0.997, format 0.998, paired consistency 0.853.
+- **All seven targets met, with the gate passed.**
+
+**Pre-registered choice (§4, 9.4): LR 3e-5**, the only arm that passes the gate.
+
+**Forgetting vs LR** (bits/byte at step 146 / 291): 3e-5 +0.016 / +0.020; 1e-4 +0.045 / +0.064;
+3e-4 +0.080 / +0.163. Grounded accuracy on dev barely depends on LR (0.90–0.95), while forgetting
+grows about 4–8×.

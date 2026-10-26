@@ -506,6 +506,17 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - Across LRs 3e-5 / 1e-4 / 3e-4, grounded accuracy barely moves (0.92 / 0.90 / 0.95), while forgetting
   grows 4–8×. LR 3e-5 is the pre-registered pick (the only gate-passing arm).
 
+### E-39 · 9.5 Gemma LoRA 5K / LR 3e-5 on test (2026-10-26; GPU $1.39, J1 $0.42)
+- **Test (`copy2`, τ 0.75):**
+  - grounded **0.912** (0.905 without the closed-book-known items), hallucination **0.086**;
+  - refusal recall **0.900** (B2 0.76), over-refusal 0.006, citation 0.980, quote fidelity 0.991, format 0.993;
+  - AUROC 0.990.
+  - **All seven targets met.**
+- **Plain decoding:** grounded 0.936, hallucination 0.123.
+- **Guards:** held-out bits/byte **+0.0198** (case law +0.033); CaseHOLD PMI −0.1 points.
+- **Pre-registered reading (docs/10-gemma.md §1):** ≥ 0.60, so the data is sound and SLM-125M (0.316) is
+  size-limited. Fine-tuning's main effect on Gemma is refusing (recall 0.25 → 0.90).
+
 ## Decision log
 
 | ID | Date | Decision | Why |

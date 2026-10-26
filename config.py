@@ -370,7 +370,7 @@ GEMMA_STAGE_CAPS_USD: Mapping[str, float] = {
     "9.4-pilot": 3.6,                   # re-derived from the 9.2 probe (was 3.0); pending approval
     "9.4b-low-lr": 1.8,                 # D-31: one 5K arm at LR 3e-5 (quoted ≈ $1.3; 9.4 measured ≈ $1.5 per arm)
     "9.5-full": 5.8,                    # re-derived from the 9.2 probe (was 6.0); not run (D-32)
-    "9.5-test-5k": 1.4,                 # D-32: test pass on the 5K / LR 3e-5 model (≈ $1.0)
+    "9.5-test-5k": 1.6,                 # D-32: test pass on the 5K / LR 3e-5 model (≈ $1.0; raised from 1.4 after C-17)
     "9-judge": 2.0,
 }
 

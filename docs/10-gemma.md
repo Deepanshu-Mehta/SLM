@@ -1,8 +1,8 @@
 # Phase 9: Gemma 2 2B on the same grounded data (comparison with SLM-125M-RAFT)
 
-**Status: APPROVED, LoRA only (D-30, 2026-10-26): "start with gemma2B raft-using lora".** The full
-fine-tuning control, Gemma 3 270M, the quantization check and best-of-8 are deferred, not dropped.
-9.1 (code, $0) in progress; every GPU step still stops at its own gate.
+**Status: DONE (2026-10-26; ≈ $8.70).** Gemma 2 2B + LoRA (LR 3e-5, 5K rows) meets all seven targets on
+test (grounded 0.912, hallucination 0.086, recall 0.900) with held-out bits/byte +0.0198. **Reading: the
+125M gap is model size, not data** (§8, 9.5). Decisions D-30 to D-32; corrections C-16, C-17.
 
 Phase 7 left three gated targets missed (test, `copy2`, τ 0.7): grounded accuracy 0.316 (target 0.60),
 hallucination 0.325 (0.15) and refusal recall 0.780 (0.80). The model cites the right passage 90% of
@@ -463,3 +463,72 @@ eval passed the gate):**
 **Forgetting vs LR** (bits/byte at step 146 / 291): 3e-5 +0.016 / +0.020; 1e-4 +0.045 / +0.064;
 3e-4 +0.080 / +0.163. Grounded accuracy on dev barely depends on LR (0.90–0.95), while forgetting
 grows about 4–8×.
+
+### 9.5 Final test on the 5K / LR 3e-5 model (D-32): DONE (2026-10-26; GPU $1.39 of $1.60; J1 $0.42)
+**Run notes:**
+- **First launch cancelled at ≈ 7 min (≈ $0.53):** the laptop idle-slept and nothing was saved (C-17).
+- **Second launch stopped itself ($0.09):** its pre-check still assumed 900 s.
+- **Third launch, under `caffeinate -i`: $0.77.** Each decoding mode was saved as it finished.
+- **The first J1 call hit a local DNS failure**, so a score computed then showed grounded 0.000: missing
+  verdicts count as wrong. It is not a result. The rerun re-attached to the submitted batch: 3,451 of
+  3,451 verdicts.
+
+**Test set (1,000 items, used once; τ 0.75 from dev):**
+
+| Test | Target | **Gemma 2 2B + LoRA, 5K, `copy2`** | Gemma LoRA, plain | Gemma 2 2B instruct few-shot, `copy2` | SLM-125M-RAFT 20K, `copy2` |
+|---|---|---|---|---|---|
+| Grounded accuracy (J1) | ≥ 0.60 | **0.912** ✅ | 0.936 | 0.838 | 0.316 ❌ |
+| … excluding the 69 closed-book-known items | | 0.905 | 0.928 | 0.821 | |
+| Hallucination | ≤ 0.15 | **0.086** ✅ | 0.123 | 0.343 | 0.325 ❌ |
+| Refusal recall (B1 / B2 / B3) | ≥ 0.80 | **0.900** ✅ (0.96 / 0.76 / 1.00) | 0.900 | 0.247 (0.18 / 0.03 / 0.88) | 0.780 ❌ |
+| Over-refusal (A) | ≤ 0.20 | 0.006 ✅ | 0.006 | 0.000 | 0.048 |
+| Citation accuracy | ≥ 0.80 | 0.980 ✅ | 0.994 | 0.904 | 0.903 |
+| Quote fidelity | ≥ 0.90 | 0.991 ✅ | 0.902 | 1.000 | 0.998 |
+| Format validity | ≥ 0.99 | 0.993 ✅ | 0.999 | 0.915 | 1.000 |
+| Paired consistency | | 0.887 | 0.920 | 0.147 | 0.273 |
+| Decision AUROC (A vs B1+B2) | | 0.990 | | 0.860 | 0.923 |
+| Held-out bits/byte change (pooled) | ≤ +0.02 | **+0.0198** ✅ (case law +0.033, SEC +0.014, web +0.014) | | — | +0.009 |
+| CaseHOLD PMI change | reported | **−0.1 points** (1,200-item subset) | | — | −4.8 points |
+
+- Merge check: the adapter merged into bf16 changes s by at most 0.005 on 32 dev prompts.
+- Saved to `/data/gemma/runs/pilot/adapter_n5000-lr3e-05/`.
+
+**Pre-registered reading (§1): Gemma 2 2B grounded accuracy 0.912 ≥ 0.60, so the data, labels and
+scoring are sound, and SLM-125M is limited by its size.**
+- On 4× less training data (5K rows against 20K), Gemma meets every target. SLM-125M reached 0.273
+  (dev) on the same 5K rows and 0.316 (test) on 20K.
+- Prior knowledge explains little: without the 13.8% of questions the instruct model answers
+  closed-book, grounded accuracy is 0.905.
+- Fine-tuning mattered mostly for **refusing**: the untuned instruct model already read well (0.838) but
+  answered 97% of near misses. LoRA raised refusal recall from 0.25 to 0.90 and cut hallucination from
+  0.34 to 0.09.
+- Without copy-constrained decoding Gemma scores slightly higher on grounded accuracy (0.936 vs 0.912).
+  The constraint matters for small models that invent quotes, not for Gemma (plain quote fidelity
+  0.902 vs SLM's 0.391, E-35).
+- **Caveats:**
+  - one LoRA run per LR, and the test was run on the 5K model, not 20K (D-32);
+  - per-source bits/byte on case law (+0.033) exceeds +0.02, though the pooled gate is met;
+  - near-miss (B2) refusal at 0.76 is the weakest number.
+
+**What Phase 10 does (§1):** preference optimization on Gemma and/or distilling Gemma into the 125M
+model. Preference optimization on SLM-125M only if its best-of-8 headroom (9.8, not run) is ≥ +0.15.
+
+### 9.9 Phase 9 summary: DONE (2026-10-26)
+**Spend ≈ $8.70:**
+- GPU $7.51: probe $0.15, baselines ≈ $1.04 (C-16), pilot ≈ $3.12 (one OOM launch), 9.4b $1.81,
+  5K test $1.39 (C-17);
+- J1 $1.19;
+- weights fetch: CPU cents.
+
+**Deviations from the plan, all recorded:**
+- LoRA only (D-30);
+- 52 SFT rows per step;
+- token-budget micro-batches;
+- CaseHOLD on a 1,200-item subset;
+- the instruct baseline under `copy2` only;
+- a third LR arm, 3e-5 (D-31);
+- the test on the 5K model instead of 20K (D-32);
+- corrections C-16 and C-17.
+
+**Not run** (deferred, D-30): the full fine-tuning control, Gemma 3 270M, the quantization check and
+best-of-8.

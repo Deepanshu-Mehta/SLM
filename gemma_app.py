@@ -425,7 +425,7 @@ def _lora_runs(max_usd: float, which: str, runs: list[dict], test_key: str | Non
     final_path = run_dir / ("final.json" if test_key is None else f"final_{test_key}.json")
     if final_path.exists():
         return {**out, "final": json.loads(final_path.read_text()), "spent_usd": spent()}
-    if spent() + (4 * G.probe_eval_s + 300) * rate > max_usd:      # 2,000 test generations ~ 4 dev passes
+    if spent() + (3 * G.probe_eval_s + 200) * rate > max_usd:      # measured: 2 test passes ~ 500 s + guards/save ~ 150 s
         log("budget: no room for the test pass; stopping before it")
         return {**out, "status": "budget_stop", "spent_usd": spent()}
     GS.load_adapter(pm, torch.load(run_dir / f"{top['key']}.pt", map_location="cpu", weights_only=False))

@@ -184,3 +184,72 @@ back to you.
 - 10.5 and 10.6 follow the pre-registered rules. The test is used once per model, after τ is fixed.
 - The headline set is chosen by the §4 rule before the test numbers are read.
 - Nothing is published (the 500M RAFT model could be, under Apache-2.0, after a separate approval).
+
+## 8. Results
+
+### 10.1 Membership test v2: DONE (2026-10-27, local, $0; E-41)
+**Setup:** `membership_check.py --n 200`, 13.5 min on CPU.
+- Passages: train 600, dev/test 509, unseen 200.
+- **Unseen** = fineweb-edu sample-10BT file `013` (row groups 100–101), beyond both corpora's ≈ 0.5B-token
+  prefix, cleaned and chunked with our pipeline, one clean passage per document.
+- Models: SLM-125M (ours), the author's 125M (same corpus and split as the 500M), the 500M.
+
+| Mean bits/byte | case law: train / dev-test | SEC: train / dev-test | web: train / dev-test / **unseen** |
+|---|---|---|---|
+| SLM-125M (ours) | 0.804 / 0.837 | 0.546 / 0.719 | 1.121 / 1.133 / 1.248 |
+| author's 125M | 0.803 / 0.821 | 0.561 / 0.710 | 1.137 / 1.127 / 1.291 |
+| 500M | 0.750 / 0.771 | 0.488 / 0.667 | 1.079 / 1.067 / 1.173 |
+
+**Web text: difference-in-differences against the unseen baseline, with SLM-125M as the reference**
+(it saw neither dev/test nor unseen; 1 = not seen; 95% bootstrap):
+- **500M 1.002 [0.935, 1.074]**: no sign it saw our dev/test passages.
+- Author's 125M 0.962 [0.898, 1.030]: a small advantage, not significant.
+
+**Legal text: dev/test vs train, relative to SLM-125M (< 1 = extra familiarity with dev/test):**
+- 500M: case law 0.989 [0.980, 0.999], SEC 1.053 [1.035, 1.071].
+- Author's 125M: case law 0.984, **SEC 0.956 [0.946, 0.966]**.
+
+**Reading:**
+- **The 500M shows at most ≈ 1% extra familiarity** with dev/test (case law), and none on web or SEC.
+- Its SEC "disadvantage" is extra memorisation of repetitive **training** filings, not of dev/test.
+- The author's 125M (10 epochs) shows a small but significant extra familiarity with dev/test (SEC ≈ 4%,
+  case law ≈ 2%), consistent with having trained on those documents.
+- The unseen web file is ≈ 9% harder for every model, so only the relative comparisons are read.
+- **§4 rule: memorisation is not flagged for the 500M. The original test set stays the headline**,
+  pending the closed-book probe (10.4) and the post-RAFT check.
+
+### 10.2 Port: DONE (2026-10-27, $0)
+**Code:**
+- **`slm500_app.py`:**
+  - `fetch` and `replay_build`/`replay_check` (CPU, one worker per corpus shard);
+  - `probe`, `pilot`, `full`, `control` (GPU, `--confirm`, per-stage caps);
+  - `_runs` = `raft_gpu_app.full_run` for another base, with the test pass saved per decoding mode.
+  - The trainer, eval and decoding modules are unchanged.
+- **`eval_forgetting.heldout_bpb_text`** (additive): the tokenizer-free gate.
+- **`config.SLM500`**: pinned revisions, the LR pilot {5e-5, 2e-5}, evals 4/8 as 7.8. Plus
+  `SLM500_STAGE_CAPS_USD`.
+
+**`smoke_slm500.py` 15/15:**
+- both author tokenizers resolve to the SLM format with our special-token ids;
+- **all 21,839 rows** encode with `<|eos|>` first and last, the forced decision tokens, and lengths
+  ≤ 1,024 (longest 770 / 809);
+- replay packing round-trips to the source text, and `WindowStore` reads it;
+- `heldout_bpb_text` equals a hand computation;
+- `sft.train_one` (keep='select', replay, micro 16 and 32) trains a tiny random Llama with the 500M
+  tokenizer, and the loss falls;
+- the closed-book prompt is correct and the gates refuse as they should.
+
+Shared code changed only by the one added function (`git diff --stat`).
+
+### 10.3 Weights and replay stores: DONE (2026-10-27, Modal CPU, cents; 0 containers)
+- **Weights:** `/data/slm500m/models/{base500, control125}` at the pinned revisions (1.04 GB / 0.25 GB).
+- **Replay stores** (`/data/slm500m/replay/<model>/`, 20 shards each): train documents only, sampled
+  by a deterministic hash (`|replay500` salt), packed doc + `<|eos|>`.
+  - base500: **27,954 windows = 28.6M tokens from 9,833 train documents**;
+  - a decoded sample window is clean case-law text; max id 32,766 < 32,768.
+
+**Probe trimmed before launch:**
+- With full CaseHOLD and two compiles it would take ≈ 13 min, over its cap.
+- It now times CaseHOLD on 200 items (the full base score runs in 10.5), and tries micro-batch 16 only
+  if 32 runs out of memory.
+- Estimate ≈ $0.55, cap $0.80.

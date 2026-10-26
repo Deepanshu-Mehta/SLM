@@ -539,6 +539,17 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   - its `config.json` bos/eos ids (1/2) disagree with its tokenizer (0/1);
   - it uses the same special-token layout and the same RAFT decision structure as ours.
 
+### E-41 · 10.1 Membership test v2 with an unseen baseline (2026-10-27; local, $0)
+- **Setup:** 600 train / 509 dev-test / 200 unseen passages (fineweb-edu file 013, outside both corpora) ×
+  three models (SLM-125M, the author's 125M, the 500M).
+- **Web text, DiD vs unseen** (ref. SLM-125M): **500M 1.002 [0.935, 1.074]**; author's 125M 0.962 [0.898, 1.030].
+- **Legal, dev/test vs train** (ratio to SLM-125M):
+  - 500M: case law 0.989, SEC 1.053 (it memorises repetitive *training* filings more);
+  - author's 125M: case law 0.984, **SEC 0.956**.
+- **Reading:** the 500M shows at most ≈ 1% extra familiarity with our dev/test passages, so overlap is not
+  flagged and the original test set stays the headline. The author's 125M (10 epochs) shows a small,
+  significant overlap.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

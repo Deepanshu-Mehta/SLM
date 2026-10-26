@@ -215,6 +215,44 @@ def heldout_bpb(net, tok, val_dir: Path, subset: dict, device: torch.device,
     return out
 
 
+@torch.no_grad()
+def heldout_bpb_text(net, tok, src_tok, val_dir: Path, subset: dict, device: torch.device,
+                     autocast: Autocast = no_autocast, prefix_id: int = M.PROMPT_PREFIX_TOKEN_ID,
+                     batch: int = 4) -> dict:
+    """Tokenizer-free held-out bits/byte for a model with ANOTHER tokenizer (Phase 10, the 500M): each
+    subset window is decoded with OUR tokenizer (skip_special_tokens: the same bytes heldout_bpb counts),
+    re-tokenized by `tok` after `prefix_id` (<|eos|> for SLM-format models), and every text token is
+    scored. Only changes in it are compared (before vs after SFT), never its level against heldout_bpb."""
+    net.eval()
+    out, tot_nats, tot_bytes = {}, 0.0, 0
+    for src, spec in subset.items():
+        path = val_dir / spec["shard"]
+        if hashlib.sha256(path.read_bytes()).hexdigest() != spec["sha256"]:
+            raise RuntimeError(f"{path} differs from the shard the subset was drawn from")
+        arr = np.memmap(path, dtype=np.uint16, mode="r").reshape(-1, config.SEQ_LEN)
+        texts = [src_tok.decode(w.tolist(), skip_special_tokens=True) for w in np.asarray(arr[spec["indices"]])]
+        seqs = [[prefix_id] + tok(t, add_special_tokens=False, split_special_tokens=True)["input_ids"] for t in texts]
+        nats, nb = 0.0, sum(len(t.encode("utf-8")) for t in texts)
+        for b in range(0, len(seqs), batch):
+            part = seqs[b:b + batch]
+            w = max(len(s) for s in part)
+            x = torch.full((len(part), w), M.PAD_TOKEN_ID, dtype=torch.long)
+            m = torch.zeros((len(part), w), dtype=torch.bool)
+            for i, s in enumerate(part):          # right padding + causal attention: no mask needed
+                x[i, :len(s)] = torch.tensor(s)
+                m[i, 1:len(s)] = True
+            x, m = x.to(device), m.to(device)
+            with autocast():
+                logits = net(input_ids=x, use_cache=False).logits
+            mm = m[:, 1:]
+            nats += float(torch.nn.functional.cross_entropy(logits[:, :-1].float()[mm], x[:, 1:][mm], reduction="sum"))
+        out[src] = {"windows": len(seqs), "bytes": nb, "nats": nats, "bpb": nats / (math.log(2) * nb)}
+        tot_nats += nats
+        tot_bytes += nb
+    out["pooled_bpb"] = tot_nats / (math.log(2) * tot_bytes)
+    return out
+
+
 # ------------------------------------------------------------------------------------ CLI
 def main() -> None:
     p = argparse.ArgumentParser(description="Phase 7 forgetting-guard baselines (local sanity run).")

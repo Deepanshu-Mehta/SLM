@@ -374,6 +374,42 @@ GEMMA_STAGE_CAPS_USD: Mapping[str, float] = {
     "9-judge": 2.0,
 }
 
+# ---- Phase 10: RAFT on a 500M model pretrained on the same corpus (docs/11-slm500m-raft.md) ----
+SLM500_DIR = f"{DATA_ROOT}/slm500m"
+
+
+@dataclass(frozen=True)
+class Slm500Config:
+    """The 500M base (thesreedath/slm-500m-base, Apache-2.0) and the author's 125M control, pinned; the
+    RAFT recipe is config.SFT (D-23/D-27) except the LR pilot below."""
+
+    base: str = "thesreedath/slm-500m-base"
+    base_revision: str = "4090f98f50ceaa06246649ab5ff38471415d9b9a"
+    control: str = "thesreedath/slm-125m-base"          # same corpus and window split as the 500M; licence "other"
+    control_revision: str = "15e0afe1d7b78224f79287372c4868baab29df15"
+    pilot_lrs: tuple[float, ...] = (5e-5, 2e-5)        # 5e-5 = SLM-125M's choice (D-23); larger models often want less
+    pilot_size: int = 5_000
+    pilot_evals: int = 4                                # as 7.8's 5K run
+    full_size: int = 20_000
+    full_evals: int = 8                                 # as 7.8's 20K run
+    micro_batch: int = 32                               # 26 SFT + 6 replay, as 7.8; the 10.4 probe may lower it
+    replay_tokens: int = 30_000_000                     # re-tokenized train-corpus windows (7.8 drew 14M per 20K run)
+    gpu: str = "H100"
+    # measured by the 10.4 probe (0 = not yet; 10.5/10.6 refuse to start)
+    probe_step_s: float = 0.0
+    probe_eval_s: float = 0.0
+
+
+SLM500 = Slm500Config()
+
+SLM500_STAGE_CAPS_USD: Mapping[str, float] = {
+    "10.4-probe": 0.8,
+    "10.5-pilot": 3.0,
+    "10.6-full": 4.5,
+    "10.7-control": 1.5,
+    "10-judge": 1.5,
+}
+
 STAGES: tuple[str, ...] = (
     "setup", "clean", "dedup", "tokenizer", "tokenize", "pretrain", "deploy", "sft",
 )

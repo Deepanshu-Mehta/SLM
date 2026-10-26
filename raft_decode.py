@@ -297,12 +297,18 @@ class FormatConstraint(LogitsProcessor):
                 if self.OPENERS[0].startswith(x) or self.OPENERS[1].startswith(x) or \
                         (x.startswith(self.OPENERS[1]) and "\n" not in x[len(self.OPENERS[1]):]):
                     ok.append(i)
-            self._open[r] = ok
+            self._open[r] = [i for i in ok if i < getattr(self, "_V", len(self.vocab))]
         return self._open[r]
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if input_ids.shape[1] - self.width < 1:
             return scores
+        V = scores.shape[1]                                      # the model's vocabulary can be smaller than the
+        if getattr(self, "_V", None) != V:                       # tokenizer's (Gemma 3: 262,144 vs 262,145 entries)
+            self.newline = [i for i in self.newline if i < V]
+            self.special = [i for i in self.special if i < V]
+            self._open = {k: [i for i in v if i < V] for k, v in self._open.items()}
+            self._V = V
         for b in range(scores.shape[0]):
             gen = input_ids[b, self.width:].tolist()
             if gen[0] == self.ids["none"]:                       # refusal branch: force the training text

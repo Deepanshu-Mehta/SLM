@@ -299,9 +299,15 @@ def _both(fn_slm, fn_g3, max_usd: float, name: str) -> None:
 
 
 @app.local_entrypoint()
-def headroom_check(confirm: bool = False, max_usd: float = 0.6):
-    """12.1 (paid: 1 x L40S per track)."""
+def headroom_check(confirm: bool = False, max_usd: float = 0.6, track: str = ""):
+    """12.1 (paid: 1 x L40S per track). --track to run one track only (resumes from a partial file)."""
     _gate(confirm, max_usd, "12.1-headroom-gpu")
+    if track:
+        rep = {"slm125": headroom_slm, "gemma3": headroom_g3}[track].remote(max_usd)
+        (LOCAL / track).mkdir(parents=True, exist_ok=True)
+        (LOCAL / track / "headroom_report.json").write_text(json.dumps(rep, indent=2))
+        print(track, json.dumps(rep))
+        return
     _both(headroom_slm, headroom_g3, max_usd, "headroom")
 
 

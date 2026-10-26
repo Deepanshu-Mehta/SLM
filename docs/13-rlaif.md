@@ -155,3 +155,58 @@ is reward hacking that the metric would hide.
 ## 7. Out of scope (separate decisions)
 - Serving an improved model from `/answer`, Hugging Face uploads, and website changes.
 - RM + PPO (possible as a later teaching extension), and Gemma 2 2B and the 500M.
+
+## 8. Results
+
+### 12.0 Code: DONE (2026-10-27, $0)
+**Code:**
+- **`raft_decode`:**
+  - `RaftConstraint(sample_decision=True)` draws the decision from s;
+  - **`FormatConstraint`** (opt-in): forces the exact training refusal, restricts the openers after
+    ` Passage k`, keeps answers on one line with no special or `<unusedN>` tokens, and caps them at 400 characters;
+  - `TemperatureLast` and `sample_batch`.
+  - Greedy decoding is unchanged.
+- **`rlaif_data`:** spare-row prompts, the constitution, judge jobs, score-gap pairs with the length check
+  on answer-vs-answer pairs, and judge–label agreement.
+- **`dpo`:** target-only log-probs, precomputed reference, DPO + 0.2 SFT + replay.
+- **`rlaif_app`:** Modal sampling and DPO jobs, two images.
+- **`rlaif_pipeline`:** judging, headroom, labels, pairs.
+
+**Validation:**
+- `smoke_rlaif.py` 15/15:
+  - sampled decision frequency matches s;
+  - forced refusal text; opener restriction;
+  - DPO term equals a hand computation; target log-probs equal the HF forward;
+  - the reference equals the policy at step 0; training raises the margin.
+- **The user's temperature concern, measured:** the real SLM-125M-RAFT at T 0.8 keeps the format on 96/96
+  samples even without `FormatConstraint`. It stays on as a safety net, and pairs require both samples to
+  be valid.
+- **Degenerate quotes:** sampling can close a quote after a fragment (e.g. `"at"`). The constitution scores
+  such quotes as weak support.
+
+**Prompts (12.2, $0):** 2,301 spare verified rows: A 1,524 / B2 380 / C 246 / B3 151 (case law 911, SEC 975,
+web 415).
+- None from train/dev/test rows or dev/test/probe-cited documents.
+- Near misses sampled K = 8, the rest K = 4: 10,724 samples per track.
+- **Deviation:** no new DeepSeek rows (≈ $0.8 saved); near-miss weighting is by K instead.
+
+### 12.1 Headroom (go/no-go): DONE, GO for both tracks (2026-10-27; GPU ≈ $0.52 of $0.60; J1 $0.70 of $1.20)
+**Run notes:**
+- **The first Gemma 3 launch crashed:** a CUDA index assert. The tokenizer has 262,145 entries but the
+  model has 262,144 logits, and `FormatConstraint` blocked the image token at id 262,144. Fixed by limiting
+  every list to the logits width, and retested.
+- **Gemma 3 hit its budget stop at 320/399 rows** and was resumed to 399.
+
+**Results:** K = 8 samples per dev A/B row (399 rows each), T 0.8, `copy2`, sampled decision. J1 on 1,486
+(SLM) + 868 (Gemma 3) distinct answered A samples, 100% coverage.
+
+| Dev | Format validity | Best-of-8 grounded | Greedy | Gain | B2: ≥ 1 refusal in 8 | Greedy B2 recall | GO |
+|---|---|---|---|---|---|---|---|
+| SLM-125M | 1.000 | **0.564** | 0.349 | **+0.215** | 0.944 | 0.667 (+0.278) | ✅ (both criteria) |
+| Gemma 3 270M | 0.997 | **0.804** | 0.658 | **+0.145** | 0.917 | 0.806 (+0.111) | ✅ (grounded criterion) |
+
+**Reading:** both policies often sample the right span or the right refusal but don't rank it first. That is
+the headroom preference optimization needs. Best-of-8 is an upper bound (oracle selection), not a forecast.
+
+**Re-costed 12.3–12.4** at the measured rates: sampling ≈ $1.6 (plan ≈ $0.5) and labels ≈ $5.8. The phase
+would cost ≈ $10 without round 2 (plan ≈ $6.5, **+54%**), so it **comes back to the user** (§5 rule).

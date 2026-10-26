@@ -202,6 +202,19 @@ def trainer_checks(tok) -> None:
     check("better(): nothing passed -> lowest bpb; a pass beats a fail; then higher score wins; a fail never replaces a pass",
           GS.better(e1, b0) and GS.better(e2, e1) and not GS.better(e3, e2) and not GS.better(e4, e2))
 
+    # length-grouped micro-batches take exactly the rows sft.micro_batch would, per step
+    plan = sft.make_plan(len(data) * 30, 3, config.GEMMA.max_len, 52, 13, sft_per_replay=0)
+    big = GS.GemmaData(data.seqs * 30, np.tile(data.plen, 30), np.tile(data.refusal, 30), data.buckets * 30, data.rows * 30)
+    from data import StreamOrder
+    order = StreamOrder(len(big), 1337)
+    same = True
+    for st in range(plan.total_steps):
+        got = np.concatenate(GS.step_micros(order, big, plan, st))
+        want = np.concatenate([order.windows(np.arange(st * 52 + m * 13, st * 52 + m * 13 + 13)) for m in range(4)])
+        lens = [len(big.seqs[i]) for i in got]
+        same &= sorted(got.tolist()) == sorted(want.tolist()) and lens == sorted(lens)
+    check("step_micros: same rows per step as sft.micro_batch, sorted by length", bool(same), f"{plan.total_steps} steps")
+
     # LoRA: zero-init adapters leave the model unchanged; training lowers the loss; round trip; merge.
     # Logit comparisons on a 2 x 64 slice: full (B, T, 256K) fp32 logits do not fit an 8 GB laptop.
     del logits

@@ -2,9 +2,9 @@
 
     modal run gemma_app.py::fetch_check                                         # weights -> Volume (CPU, cents)
     modal run --detach gemma_app.py::probe_check --confirm --max-usd 0.5        # 9.2, 1 x H100
-    modal run --detach gemma_app.py::baselines_check --confirm --max-usd 1.0    # 9.3, 1 x L40S
-    modal run --detach gemma_app.py::pilot_check --confirm --max-usd 3.0        # 9.4, 1 x H100
-    modal run --detach gemma_app.py::full_check --confirm --lr <9.4 pick> --max-usd 6.0   # 9.5, 1 x H100
+    modal run --detach gemma_app.py::baselines_check --confirm --max-usd 1.0    # 9.3, 1 x H100
+    modal run --detach gemma_app.py::pilot_check --confirm --max-usd 3.6        # 9.4, 1 x H100
+    modal run --detach gemma_app.py::full_check --confirm --lr <9.4 pick> --max-usd 5.8   # 9.5, 1 x H100
 
 Every GPU function projects spend from its own wall clock (+60 s start allowance) and stops before a
 run, eval or pass that would cross --max-usd; inside a training run the guard is re-checked every
@@ -59,6 +59,14 @@ def _clock(gpu: str, log_path: Path | None = None):
             with log_path.open("a") as fh:
                 fh.write(line + "\n")
     return spent, log
+
+
+def _casehold_items() -> list[dict]:
+    """The seeded CaseHOLD subset scored before and after training (config.GEMMA.casehold_items)."""
+    import numpy as np
+    items = [json.loads(ln) for ln in CASEHOLD.read_text().splitlines() if ln.strip()]
+    pick = np.sort(np.random.default_rng([G.seed, 11]).choice(len(items), G.casehold_items, replace=False))
+    return [items[i] for i in pick]
 
 
 def _gens(rows: list[dict], out: list[dict]) -> list[dict]:
@@ -231,10 +239,11 @@ def probe_check(confirm: bool = False, max_usd: float = 0.5):
 
 
 # -------------------------------------------------------------------------------- 9.3
-@app.function(image=image, gpu=G.eval_gpu, volumes=VOLUMES, cpu=8.0, memory=32_768, timeout=60 * 40)
+@app.function(image=image, gpu=G.gpu, volumes=VOLUMES, cpu=8.0, memory=32_768, timeout=60 * 40)
 def baselines(max_usd: float) -> dict:
-    """9.3: gemma-2-2b-it few-shot (tau on dev by the pre-registered rule, then test once, plain and
-    copy2) and the closed-book probe on the 500 test A questions."""
+    """9.3: gemma-2-2b-it few-shot (tau on dev by the pre-registered rule, then test once, copy2 only:
+    the serving mode; plain dropped after the probe to fit the cap) and the closed-book probe on the 500
+    test A questions."""
     import torch
     from transformers import AutoTokenizer
 
@@ -242,7 +251,7 @@ def baselines(max_usd: float) -> dict:
     import gemma_sft as GS
     import sft
     from train import autocast
-    spent, log = _clock(G.eval_gpu, ROOT / "baselines" / "log.txt")
+    spent, log = _clock(G.gpu, ROOT / "baselines" / "log.txt")
     device = torch.device("cuda")
     ac = lambda: autocast(device)
     tok = AutoTokenizer.from_pretrained(INSTRUCT_DIR)
@@ -262,10 +271,10 @@ def baselines(max_usd: float) -> dict:
             rep["tau"] = E.choose_tau(E.tau_table(s, refuse, buckets))
         tau = rep["tau"]["tau"]
         rep[f"{group}_decision"] = E.decision_metrics(s, refuse, buckets, tau)
-        for mode in ("plain", "copy2"):
+        for mode in ("copy2",):
             if spent() > max_usd * 0.85:
                 raise SystemExit(f"budget: stopping before {group} {mode} (spent ${spent():.2f})")
-            g = E.generate_batch(net, tok, prompts, [len(c) for c in cps], device, tau=tau, batch=8, autocast=ac,
+            g = E.generate_batch(net, tok, prompts, [len(c) for c in cps], device, tau=tau, batch=16, autocast=ac,
                                  copy_passages=cps if mode == "copy2" else None)
             rep[f"{group}_{mode}_proxy"] = E.proxy_metrics(rows, g)
             (out_dir / f"{group}_{mode}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in _gens(rows, g)))
@@ -293,7 +302,7 @@ def baselines(max_usd: float) -> dict:
 
 @app.local_entrypoint()
 def baselines_check(confirm: bool = False, max_usd: float = 1.0):
-    """9.3 (paid: 1 x L40S). Requires --confirm."""
+    """9.3 (paid: 1 x H100). Requires --confirm."""
     _gate(confirm, max_usd, "9.3-baselines")
     rep = baselines.remote(max_usd)
     _save("baselines", {"report.json": rep})
@@ -325,7 +334,7 @@ def _lora_runs(max_usd: float, which: str, runs: list[dict]) -> dict:
     net = GS.load_base(str(BASE_DIR), device)
     val_dir = Path(config.VAL_TOKENS_DIR)
     subset = EF.heldout_subset(val_dir)
-    items = [json.loads(ln) for ln in CASEHOLD.read_text().splitlines() if ln.strip()]
+    items = _casehold_items()
     cap = net.config.final_logit_softcapping
     guards_path = ROOT / "guards_base.json"
     if guards_path.exists():

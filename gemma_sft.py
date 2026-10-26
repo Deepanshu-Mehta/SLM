@@ -222,6 +222,14 @@ def heldout_bpb(net, tok, src_tok, val_dir: Path, subset: dict, device: torch.de
 
 
 # ------------------------------------------------------------------------------ train
+def step_micros(order: StreamOrder, train: GemmaData, plan: sft.Plan, step: int) -> list[np.ndarray]:
+    """The step's rows (the same set as sft.micro_batch would take), sorted by length and split into
+    micro-batches: less padding (9.2 probe: -12% tokens), same per-step loss up to summation order."""
+    idx = order.windows(np.arange(step * plan.sft_per_step, (step + 1) * plan.sft_per_step, dtype=np.int64))
+    idx = idx[np.argsort([len(train.seqs[i]) for i in idx], kind="stable")]
+    return [idx[k * plan.sft_micro:(k + 1) * plan.sft_micro] for k in range(plan.accum)]
+
+
 def better(ev: dict, best: dict) -> bool:
     """keep='select' (sft.train_one, D-27): best proxy among gate-passing evals, else lowest bits/byte."""
     if not best.get("gate_ok") and not ev["gate_ok"]:
@@ -255,11 +263,8 @@ def train_run(pm, init_state: dict, train: GemmaData, dev: GemmaData, dec: dict,
         cur = lr_at(step, plan.total_steps, plan.warmup_steps, lr, lr * S.min_lr_fraction)
         for g in opt.param_groups:
             g["lr"] = cur
-        parts = []
-        for mi in range(plan.accum):
-            base = step * plan.sft_per_step + mi * plan.sft_micro
-            idx = order.windows(np.arange(base, base + plan.sft_micro, dtype=np.int64))
-            parts.append(([train.seqs[i] for i in idx], train.plen[idx].tolist()))
+        parts = [([train.seqs[i] for i in idx], train.plen[idx].tolist())
+                 for idx in step_micros(order, train, plan, step)]
         n_tok = sum(int(len(s) - p) for seqs, ps in parts for s, p in zip(seqs, ps))
         acc = {"sft": 0.0, "dec_ce": 0.0, "dec_ok": 0, "n": 0}
         for seqs, ps in parts:

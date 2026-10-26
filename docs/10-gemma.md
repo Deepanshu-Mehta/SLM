@@ -319,3 +319,48 @@ steps and resume strategy. Afterwards, `modal container list` must show 0.
   - **Gates:** refuse without `--confirm` and over the cap.
 - **Environment:** the first combined run was killed for memory on the 8 GB laptop (full 256K-vocab
   logits). The LoRA comparisons now use a 2 × 64 slice.
+
+### 9.2 Container probe: DONE (2026-10-26, $0.15 of `--max-usd 0.5`; 0 containers afterwards)
+**Weights (`fetch`, CPU, cents):**
+- `gemma-2-2b` was re-saved in bf16 (2,614,341,888 parameters) and `gemma-2-2b-it` copied as published,
+  both at the pinned revisions;
+- `/data/gemma/models/` holds 10.5 GB.
+
+**Measured on 1 × H100:**
+
+| What | Result |
+|---|---|
+| eager vs SDPA, decision score on 16 dev prompts | max \|Δs\| 0.0083: small but not zero (SDPA drops the attention soft-cap); **eager kept** |
+| LoRA trainable parameters | 41,533,440 (1.6%) |
+| micro-batch 13, longest rows (12,012 padded tokens) | 0.71 s forward + backward, **peak 68.9 GB** |
+| micro-batch 13, typical rows (11,362 tokens) | 0.67 s, 63.5 GB (5.9e-5 s per token, ≈ 14% MFU) |
+| micro-batch 26 | **out of memory** (eager attention materialises the attention probabilities) → micro 13 × 4 |
+| teacher-forced, 128 dev rows | 2.6 s |
+| generation, 32 dev rows (untrained adapter: runs to 128 tokens, so an upper bound) | plain 6.6 s, `copy2` 9.3 s |
+| held-out bits/byte, 30 windows | 1.4 s; **Gemma base 0.619 bits/byte** (vs SLM-125M's 0.657 on the full subset; 30 windows only) |
+| CaseHOLD, 48 items | 4.8 s |
+
+**Training is ~2.5× slower than the FLOP estimate in §5** (eager attention, 14% MFU, and 23% padding).
+The pilot estimate exceeded its plan by more than 30%, so it came back to the user (§4, 9.2). Changes at
+no cost:
+- **Length-grouped micro-batches:** the 52 rows of a step are sorted by length before being split into
+  4 micro-batches. The rows per step are unchanged, so the loss is unchanged up to summation order
+  (unit-tested). Padded tokens per step drop from 40.9K to 36.0K (−12%).
+- **CaseHOLD on a seeded 1,200-item subset** before and after training (reported, not gated). The full
+  3,600 would take ≈ 4.5 min per pass.
+- **9.3 runs on the H100** (the L40S would take longer than its cost saving is worth). The few-shot
+  baseline generates under `copy2` only (the serving mode).
+- `config.GEMMA.probe_step_s = 2.12` and `probe_eval_s = 183` (upper bound). These now drive the
+  in-container budget guards.
+
+**Re-derived budget** (the estimate uses generation at about half the probe's worst case; the upper bound
+uses the worst case):
+
+| Step | Estimate | Upper bound | `--max-usd` |
+|---|---|---|---|
+| 9.2 probe | **spent $0.15** | | 0.5 |
+| 9.3 baselines (H100) | ≈ $0.7 | $0.9 | 1.0 |
+| 9.4 pilot: 2 LoRA LRs × 5K (291 steps each, ≈ 10 min of training per arm) | ≈ $2.7 | $3.4 | **3.6** (was 3.0) |
+| 9.5 full: 20K (1,155 steps, ≈ 41 min of training) | ≈ $4.6 | $5.4 | **5.8** (was 6.0) |
+| J1 | ≈ $1.0 | | 2.0 |
+| **Core total** | **≈ $9.2** | **$10.9** | caps $12.9 |

@@ -349,23 +349,24 @@ class GemmaConfig:
     grad_clip: float = 1.0
     gen_batch: int = 32
     max_len: int = 1_024                # longest train row: 985 Gemma tokens (measured); rows are checked
-    gpu: str = "H100"
-    eval_gpu: str = "L40S"
+    gpu: str = "H100"                   # all Phase 9 GPU steps (9.3 moved off L40S after the probe)
     seed: int = 1337
+    casehold_items: int = 1_200         # seeded subset, before and after (reported metric; 9.2: 7.5 s per 100 items)
     # measured by the 9.2 probe (0 = not yet; 9.4/9.5 refuse to start): seconds per optimizer step at
-    # micro_batch, and seconds per in-training eval (held-out bits/byte + dev copy2 generation + teacher-forced)
-    probe_step_s: float = 0.0
-    probe_eval_s: float = 0.0
+    # micro_batch (5.88e-5 s/token x 36.0K padded tokens per length-grouped step), and seconds per in-training
+    # eval (teacher-forced dev 10 s + held-out bits/byte 28 s + dev copy2 generation <= 145 s; upper bound)
+    probe_step_s: float = 2.12
+    probe_eval_s: float = 183.0
 
 
 GEMMA = GemmaConfig()
 
 # Spend caps per Phase 9 step, USD (docs/10-gemma.md §5; LoRA-only variant, D-30).
 GEMMA_STAGE_CAPS_USD: Mapping[str, float] = {
-    "9.2-probe": 0.5,
+    "9.2-probe": 0.5,                   # spent $0.15
     "9.3-baselines": 1.0,
-    "9.4-pilot": 3.0,
-    "9.5-full": 6.0,
+    "9.4-pilot": 3.6,                   # re-derived from the 9.2 probe (was 3.0); pending approval
+    "9.5-full": 5.8,                    # re-derived from the 9.2 probe (was 6.0)
     "9-judge": 2.0,
 }
 

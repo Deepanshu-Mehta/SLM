@@ -344,7 +344,8 @@ class GemmaConfig:
     full_evals: int = 4
     epochs: int = 3
     sft_rows_per_step: int = 52         # Phase 7's SFT rows per step (64 sequences minus 12 replay windows)
-    micro_batch: int = 13               # 4 micro-batches per step; re-checked by the 9.2 memory probe
+    micro_batch: int = 13               # sets the step plan (52 = 13 x 4); actual micro-batches are by tokens
+    micro_tokens: int = 9_600           # padded tokens per micro-batch (9.2: 11.4K -> 63.5 GB; 9.4 OOM at 13 longest rows)
     weight_decay: float = 0.0           # on the adapters
     grad_clip: float = 1.0
     gen_batch: int = 32

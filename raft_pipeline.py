@@ -34,7 +34,9 @@ from teacher import DeepSeek, GeminiBatch, Job, Ledger, load_env
 
 T = config.TEACHER
 LOCAL = Path(".smoke/raft")
-STAGE_CAP = {"trial": "7.3-trial", "pilot": "7.4-pilot-data", "pilot-eval": "7.7-judge", "scale": "7.8-scale-data"}
+STAGE_CAP = {"trial": "7.3-trial", "pilot": "7.4-pilot-data", "pilot-eval": "7.7-judge", "scale": "7.8-scale-data",
+             "gemma": "9-judge"}              # Phase 9 (docs/10-gemma.md): J1 on Gemma outputs, local files in .smoke/gemma
+GEMMA_LOCAL = Path(".smoke/gemma")
 TRIAL_PLAN = {"G1": 2 / 3, "G2": 1 / 6, "G3": 1 / 6}
 GEMINI_MAX_TOKENS = 1_024              # Gemini counts thinking inside max_output_tokens
 GEMINI_CHECK_MAX_TOKENS = 384          # trial 7.3: check output+thoughts median 58, max 202 tokens
@@ -66,13 +68,14 @@ AUDIT_MAX_DISAGREE = 0.15
 
 
 def sdir(stage: str) -> Path:
-    d = LOCAL / stage
+    d = GEMMA_LOCAL if stage == "gemma" else LOCAL / stage
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def ledger(stage: str) -> Ledger:
-    return Ledger(sdir(stage) / "ledger.json", config.RAFT_STAGE_CAPS_USD[STAGE_CAP[stage]])
+    caps = {**config.RAFT_STAGE_CAPS_USD, **config.GEMMA_STAGE_CAPS_USD}
+    return Ledger(sdir(stage) / "ledger.json", caps[STAGE_CAP[stage]])
 
 
 def jsonl(path: Path) -> list[dict]:
@@ -879,6 +882,14 @@ def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict
 
 
 def _eval_inputs(stage: str = "pilot-eval") -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    if stage == "gemma":                    # Phase 9: every copy2 output and every test output, keyed '{step}/{file}'
+        rows = {r["id"]: r for g in ("dev", "test") for r in jsonl(LOCAL / "scale" / "datasets" / f"{g}.jsonl")}
+        gens = {f"{f.parent.name}/{f.stem}": jsonl(f) for d in ("baselines", "pilot", "full")
+                for f in sorted((GEMMA_LOCAL / d).glob("*.jsonl"))
+                if f.stem.endswith("_copy2") or f.stem.startswith("test_")}
+        if not gens:
+            raise SystemExit(f"no generations under {GEMMA_LOCAL}: run gemma_app.py first")
+        return rows, gens
     if stage == "scale":                    # 7.8: dev copy2 per curve point + test plain/copy2 of the best run
         d = LOCAL / "scale" / "eval"
         rows = {r["id"]: r for g in ("dev", "test") for r in jsonl(LOCAL / "scale" / "datasets" / f"{g}.jsonl")}
@@ -909,7 +920,11 @@ def cmd_judge(args) -> None:
     st, lg = sdir(args.stage), ledger(args.stage)
     rows, gens = _eval_inputs(args.stage)
     jobs = [j for j in judge_jobs(rows, gens) if j.key not in _reused(gens)]
+    if args.stage == "gemma":
+        jobs += closed_book_jobs(rows)
     out = st / "j1.jsonl"
+    done = {r["key"] for r in jsonl(out) if r["ok"]}       # Phase 9 judges in rounds (pilot, then full)
+    jobs = [j for j in jobs if j.key not in done]
     gb = GeminiBatch(lg)
     for i in range(0, len(jobs), GEMINI_CHUNK):
         part = gb.run(jobs[i:i + GEMINI_CHUNK], out, f"raft-{args.stage}-j1-{i // GEMINI_CHUNK}")
@@ -924,6 +939,20 @@ def cmd_judge(args) -> None:
     print(f"J1: {len(jobs)} jobs; {sum(r['ok'] for r in jsonl(out))} verdicts; spend ${lg.spent:.4f}")
 
 
+CLOSED_BOOK = GEMMA_LOCAL / "baselines" / "closed_book_test_A.jsonl"
+
+
+def closed_book_jobs(rows: dict[str, dict]) -> list[Job]:
+    """Phase 9 closed-book probe: gemma-2-2b-it answered the test A questions without passages; J1
+    grades `correct` against the reference (with the passages shown to the judge, as always)."""
+    jobs = []
+    for g in jsonl(CLOSED_BOOK):
+        r = rows[g["id"]]
+        system, user = P.j1_messages(r["passages"] or [], r["question"], r["answer"], g["answer"])
+        jobs.append(Job(f"{g['id']}|closed_book", system, user, GEMINI_CHECK_MAX_TOKENS))
+    return jobs
+
+
 def cmd_score(args) -> None:
     rows, gens = _eval_inputs(args.stage)
     verdicts = {r["key"]: r["json"] for r in jsonl(sdir(args.stage) / "j1.jsonl") if r["ok"]}
@@ -933,11 +962,21 @@ def cmd_score(args) -> None:
     judged = {j.key for j in judge_jobs(rows, gens)}
     print(f"J1 verdicts for {len(judged & set(verdicts))} of {len(judged)} judged outputs")
     rep = {m: score_eval(rows, gens[m], verdicts, m) for m in gens}
+    if args.stage == "gemma" and CLOSED_BOOK.exists():     # grounded accuracy without the closed-book-known items
+        known = {k.split("|")[0] for k, v in verdicts.items() if k.endswith("|closed_book") and v.get("correct")}
+        n_cb = sum(k.endswith("|closed_book") for k in verdicts)
+        rep["closed_book"] = {"judged": n_cb, "correct": len(known), "rate": len(known) / max(1, n_cb)}
+        for m in [m for m in gens if m.split("/")[-1].startswith("test_")]:
+            unknown = [g for g in gens[m] if not (rows[g["id"]]["bucket"] == "A" and g["id"] in known)]
+            rep[m]["grounded_accuracy_closed_book_unknown"] = score_eval(rows, unknown, verdicts, m)["grounded_accuracy"]
+        print(f"closed book: {len(known)} of {n_cb} test A questions answered correctly without passages")
     (sdir(args.stage) / "headline.json").write_text(json.dumps(rep, indent=2))
     targets = {"hallucination": ("<=", 0.15), "refusal_recall": (">=", 0.80), "over_refusal_A": ("<=", 0.20),
                "grounded_accuracy": (">=", 0.60), "citation_accuracy": (">=", 0.80),
                "quote_fidelity": (">=", 0.90), "format_validity": (">=", 0.99)}
     for m in gens:
+        if m not in rep:
+            continue
         print(f"[{m}]")
         for k, (op, t) in targets.items():
             v = rep[m][k]

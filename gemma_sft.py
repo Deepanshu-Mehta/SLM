@@ -222,12 +222,21 @@ def heldout_bpb(net, tok, src_tok, val_dir: Path, subset: dict, device: torch.de
 
 
 # ------------------------------------------------------------------------------ train
-def step_micros(order: StreamOrder, train: GemmaData, plan: sft.Plan, step: int) -> list[np.ndarray]:
-    """The step's rows (the same set as sft.micro_batch would take), sorted by length and split into
-    micro-batches: less padding (9.2 probe: -12% tokens), same per-step loss up to summation order."""
+def step_micros(order: StreamOrder, train: GemmaData, plan: sft.Plan, step: int,
+                max_tokens: int = G.micro_tokens) -> list[np.ndarray]:
+    """The step's rows (the same set as sft.micro_batch would take), sorted by length and packed
+    greedily into micro-batches of at most `max_tokens` padded tokens. Less padding (9.2 probe: -12%)
+    and bounded memory (9.4: 13 fixed rows of the longest lengths ran out of memory); the per-step
+    loss is unchanged up to summation order, since it is normalised by the whole step's token count."""
     idx = order.windows(np.arange(step * plan.sft_per_step, (step + 1) * plan.sft_per_step, dtype=np.int64))
     idx = idx[np.argsort([len(train.seqs[i]) for i in idx], kind="stable")]
-    return [idx[k * plan.sft_micro:(k + 1) * plan.sft_micro] for k in range(plan.accum)]
+    micros, cur = [], []
+    for i in idx:                                    # ascending length: the new row sets the width
+        if cur and (len(cur) + 1) * len(train.seqs[i]) > max_tokens:
+            micros.append(np.asarray(cur))
+            cur = []
+        cur.append(i)
+    return micros + [np.asarray(cur)]
 
 
 def better(ev: dict, best: dict) -> bool:
@@ -255,7 +264,8 @@ def train_run(pm, init_state: dict, train: GemmaData, dev: GemmaData, dec: dict,
     opt = torch.optim.AdamW(params, lr=lr, betas=(config.TRAIN.beta1, config.TRAIN.beta2), eps=1e-8,
                             weight_decay=G.weight_decay, **({"fused": True} if device.type == "cuda" else {}))
     best, best_state, history, status = {"step": 0}, None, [], "completed"
-    log(f"[plan] steps {plan.total_steps} ({plan.steps_per_epoch}/epoch), {plan.sft_micro} x {plan.accum} rows/step, "
+    log(f"[plan] steps {plan.total_steps} ({plan.steps_per_epoch}/epoch), {plan.sft_per_step} rows/step in "
+        f"micro-batches of <= {G.micro_tokens} padded tokens, "
         f"eval every {eval_every}, lr {lr:g}, trainable {sum(p.numel() for p in params):,}")
     pm.train()
     t0, toks = time.time(), 0

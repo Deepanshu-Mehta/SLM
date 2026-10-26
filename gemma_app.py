@@ -29,6 +29,7 @@ image = (
     .apt_install("gcc")
     .pip_install("torch==2.5.1", "transformers==4.46.3", "numpy==2.1.3", "safetensors==0.4.5",
                  "peft==0.13.2", "accelerate==1.1.1")
+    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})   # 9.4: 8.7 GB reserved-unallocated at the OOM
     .add_local_python_source("config", "model", "data", "train", "cleaning", "raft_data", "raft_decode",
                              "eval_raft", "eval_forgetting", "sft", "gemma_sft")
 )
@@ -259,8 +260,14 @@ def baselines(max_usd: float) -> dict:
     shots = GS.pick_shots(sft.load_rows(SCALE_DIR / "train.jsonl"))
     out_dir = ROOT / "baselines"
     out_dir.mkdir(parents=True, exist_ok=True)
-    rep: dict = {"shots": [s["id"] for s in shots]}
+    part_path = out_dir / "report_partial.json"          # resume: a finished group (and dev's tau) is kept
+    rep: dict = json.loads(part_path.read_text()) if part_path.exists() else {"shots": [s["id"] for s in shots]}
+    if rep["shots"] != [s["id"] for s in shots]:
+        raise SystemExit("saved partial report used different shots")
     for group in ("dev", "test"):
+        if f"{group}_copy2_proxy" in rep and (out_dir / f"{group}_copy2.jsonl").exists():
+            log(f"{group}: kept from the earlier run")
+            continue
         rows = sft.load_rows(SCALE_DIR / f"{group}.jsonl")
         prompts = [GS.instruct_prompt(r, shots) for r in rows]
         cps = [r["passages"] or [] for r in rows]
@@ -279,8 +286,11 @@ def baselines(max_usd: float) -> dict:
             rep[f"{group}_{mode}_proxy"] = E.proxy_metrics(rows, g)
             (out_dir / f"{group}_{mode}.jsonl").write_text("".join(json.dumps(x) + "\n" for x in _gens(rows, g)))
             log(f"{group} {mode}: tau {tau} {rep[f'{group}_{mode}_proxy']}")
+        part_path.write_text(json.dumps(rep, indent=2))
         volume.commit()
     test_a = [r for r in sft.load_rows(SCALE_DIR / "test.jsonl") if r["bucket"] == "A"]
+    if spent() + 90 * _rate(G.gpu) > max_usd:           # C-16: the closed-book pass was unchecked
+        raise SystemExit(f"budget: stopping before the closed-book probe (spent ${spent():.2f})")
     cb = []
     tok.padding_side = "left"
     for i in range(0, len(test_a), 16):

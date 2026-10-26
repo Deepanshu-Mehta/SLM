@@ -364,3 +364,75 @@ uses the worst case):
 | 9.5 full: 20K (1,155 steps, ≈ 41 min of training) | ≈ $4.6 | $5.4 | **5.8** (was 6.0) |
 | J1 | ≈ $1.0 | | 2.0 |
 | **Core total** | **≈ $9.2** | **$10.9** | caps $12.9 |
+
+### 9.3 Baselines without fine-tuning: DONE (2026-10-26; GPU ≈ $1.04 of $1.00, C-16; J1 $0.43)
+**Run notes:**
+- **The first run was cancelled from outside after dev, at 6 minutes** (the container logged a
+  cancellation signal; it was not the budget guard or an OOM).
+- The dev τ table and proxies were rebuilt exactly from the saved `dev_copy2.jsonl` (τ and every proxy
+  matched the log). The step resumed for test and the closed-book probe.
+- **The resume cost $0.57 against `--max-usd 0.55`:** the closed-book pass was unchecked. Fixed; C-16.
+
+**Gemma 2 2B instruct, few-shot (2 train examples), `copy2`, J1:**
+
+| Metric | Target | dev | **test** | SLM-125M-RAFT test |
+|---|---|---|---|---|
+| τ (pre-registered rule; no τ met both targets) | | 0.05 | 0.05 | 0.7 |
+| Grounded accuracy | ≥ 0.60 | 0.873 | **0.838** ✅ | 0.316 |
+| Hallucination | ≤ 0.15 | 0.307 | **0.343** ❌ | 0.325 |
+| Refusal recall | ≥ 0.80 | 0.210 | **0.247** ❌ (B1 0.18 / B2 0.03 / B3 0.88) | 0.780 |
+| Over-refusal (A) | ≤ 0.20 | 0.000 | 0.000 ✅ | 0.048 |
+| Citation accuracy | ≥ 0.80 | 0.938 | 0.904 ✅ | 0.903 |
+| Quote fidelity | ≥ 0.90 | 1.000 | 1.000 ✅ | 0.998 |
+| Format validity | ≥ 0.99 | 0.922 | 0.915 ❌ | 1.000 |
+| Decision AUROC (A vs B1+B2) | | 0.874 | 0.860 | 0.923 |
+
+**Closed-book probe:** the instruct model answers 69 of 500 test A questions (13.8%) correctly with no
+passages. On the other 431, grounded accuracy is **0.821**, so prior knowledge explains little of the
+0.838.
+
+**Reading:**
+- **Untuned, the 2B model already reads within the passages far better than SLM-125M-RAFT:** 0.84 vs 0.32
+  grounded accuracy at the same citation accuracy (0.90).
+- **It almost never refuses.** It answers 97% of near misses, and its hallucination is the same as the
+  125M model's but for the opposite reason: wrong answers to unanswerable questions, not misread answers.
+- These are baselines. The pre-registered reading (§1) is made on the fine-tuned 20K Gemma (9.5).
+
+### 9.4 Pilot at 5K: DONE, gate FAILED (2026-10-26; GPU ≈ $3.12 of $3.60; J1 $0.22)
+**Run notes:**
+- **First launch: out of memory at step ≈ 12** (≈ 3 min, ≈ $0.25). With length grouping, a step's 13
+  longest rows share a micro-batch: 69.5 GB allocated plus 8.7 GB fragmented. The base guards had already
+  been saved and were reused.
+- **Fix:** micro-batches are packed by a token budget (≤ 9,600 padded tokens, about 4 per step; the same
+  rows per step and the same loss), plus `expandable_segments`. Unit-tested.
+- **Relaunch:** completed for $2.87, 0 containers afterwards; 16.8K tokens/s, ≈ 18.5 min per arm.
+
+**Gemma 2 2B base on the guards:**
+- held-out bits/byte **0.6275** on the 600-window subset (SLM-125M base 0.7090 on the same windows;
+  Gemma may have seen this public text);
+- CaseHOLD PMI 0.634 on the seeded 1,200 subset.
+
+**Results (dev, `copy2`, J1; selected checkpoint = step 146 in both arms, the lowest bits/byte because no
+eval passed the gate):**
+
+| | Target | LoRA 1e-4 | LoRA 3e-4 | instruct few-shot (9.3) | SLM-125M 5K (7.8) |
+|---|---|---|---|---|---|
+| Held-out bits/byte, step 146 / 291 | ≤ +0.02 | **+0.045 / +0.064** ❌ | **+0.080 / +0.163** ❌ | — | +0.006 |
+| τ (pre-registered rule) | | 0.85 | 0.20 | 0.05 | 0.50 |
+| Grounded accuracy | ≥ 0.60 | **0.898** | **0.953** | 0.873 | 0.273 |
+| Hallucination | ≤ 0.15 | **0.038** | **0.040** | 0.307 | 0.327 |
+| Refusal recall | ≥ 0.80 | 0.960 | 0.976 | 0.210 | 0.823 |
+| Over-refusal (A) | ≤ 0.20 | 0.022 | 0.015 | 0.000 | 0.105 |
+| Citation accuracy | ≥ 0.80 | 0.981 | 0.996 | 0.938 | |
+| Quote fidelity | ≥ 0.90 | 0.997 | 0.990 | 1.000 | |
+| Format validity | ≥ 0.99 | 0.998 | 0.998 | 0.922 | |
+| Paired consistency | | 0.827 | 0.920 | 0.160 | |
+| Decision AUROC (teacher-forced) | | 0.995 | 0.998 | 0.874 | |
+
+**Reading:**
+- **On the same 5K rows, Gemma 2 2B with LoRA meets all seven §8.1 targets on dev.** SLM-125M reached
+  0.27 grounded accuracy on the same rows. The data and labels are not the bottleneck; the gap is the
+  student (to be confirmed on test, §1).
+- **The forgetting gate fails, and grows with LR and with steps.** The held-out loss rose 7–13% at the
+  selected checkpoints, and it did not recover as the LR annealed (unlike SLM-125M, E-28).
+- **Pre-registered rule (§4, 9.4): no arm passes the gate, so stop and bring it back** (D-31 pending).

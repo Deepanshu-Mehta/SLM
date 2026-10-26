@@ -487,6 +487,18 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Effect:** `copy3` vs `copy2` on the 20K weights: hallucination 0.309 → 0.299, grounded 0.349 → 0.367; 64 of 499 outputs changed.
 - **Not adopted.** The pre-registered bar was −0.03 hallucination. The unsupported answers are already spans: wrong spans.
 
+### E-37 · Phase 9.3–9.4: Gemma 2 2B on the same grounded data (2026-10-26; GPU ≈ $4.31, J1 $0.66)
+- **Instruct few-shot (untuned), test, `copy2`:**
+  - grounded 0.838, hallucination 0.343, refusal recall 0.247 (B2 0.03), format 0.915;
+  - closed-book: 13.8% of test A questions answered without passages; grounded on the rest 0.821.
+- **LoRA (r 32) on the same 5K rows, dev, J1:**
+  - grounded 0.898 / 0.953 (LR 1e-4 / 3e-4), hallucination 0.038 / 0.040, recall 0.96 / 0.98: **all
+    seven targets met**;
+  - **held-out bits/byte +0.045 / +0.080** at the selected step (+0.064 / +0.163 at the end): **the gate failed**.
+- **Reading:** on the same rows and eval, the 125M gap is model size, not data. LoRA forgetting on our
+  corpus grows with LR and steps and does not recover as the LR anneals (unlike E-28).
+- Detail: `docs/10-gemma.md` §8.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -541,3 +553,4 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | C-13 | 7.7 is "$0" (PROJECT_STATE and two messages, 10-18/10-21) | 7.7 includes the J1 judge on the pilot candidate (≈ $0.50 for both decodings) plus a ≈ $0.45 GPU retrain | I misread the plan's step table (§5 says ≈ $0.40); caught in the review before 7.7 |
 | C-14 | (a) Keep the best-decision-F1 / final epoch (§7.1, D-23); (b) 10K → grounded 0.30–0.45 (E-31) | (a) Select on the dev proxy score under `copy2` (content + decisions); (b) no judged learning curve exists yet, so no projection | (a) Answer content overfits from epoch 3 while decision-F1 still rises (E-32). (b) The projection used the plain-decoding proxy, which measured invented quotes |
 | C-15 | 7.8b regeneration capped at `--max-usd 0.15` | It cost $0.245; the 7.8 GPU stage is $2.07, $0.07 over its $2 cap | The guard checked only before generation, and the answer constraint's fallback is slow. Fixed: the budget is re-checked per 64-row chunk |
+| C-16 | 9.3 baselines capped at $1.00 (`--max-usd 1.0`, then 0.55 for the resume) | ≈ $1.04: the first run (≈ $0.45–0.49, 6 min) was cancelled from outside after dev; the resume cost $0.57, $0.02 over its 0.55 | The closed-book probe ran after the last budget check. Fixed: `baselines` now checks the budget before the closed-book pass too. The cancellation cause is unknown (the container logged a cancellation signal; no OOM or budget stop); later launches use `nohup` |

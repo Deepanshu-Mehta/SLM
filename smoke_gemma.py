@@ -209,11 +209,14 @@ def trainer_checks(tok) -> None:
     order = StreamOrder(len(big), 1337)
     same = True
     for st in range(plan.total_steps):
-        got = np.concatenate(GS.step_micros(order, big, plan, st))
+        micros = GS.step_micros(order, big, plan, st, max_tokens=3_000)
+        got = np.concatenate(micros)
         want = np.concatenate([order.windows(np.arange(st * 52 + m * 13, st * 52 + m * 13 + 13)) for m in range(4)])
         lens = [len(big.seqs[i]) for i in got]
         same &= sorted(got.tolist()) == sorted(want.tolist()) and lens == sorted(lens)
-    check("step_micros: same rows per step as sft.micro_batch, sorted by length", bool(same), f"{plan.total_steps} steps")
+        same &= all(len(m) * max(len(big.seqs[i]) for i in m) <= 3_000 or len(m) == 1 for m in micros)
+    check("step_micros: same rows per step as sft.micro_batch, sorted, micro-batches within the token budget",
+          bool(same), f"{plan.total_steps} steps")
 
     # LoRA: zero-init adapters leave the model unchanged; training lowers the loss; round trip; merge.
     # Logit comparisons on a 2 x 64 slice: full (B, T, 256K) fp32 logits do not fit an 8 GB laptop.

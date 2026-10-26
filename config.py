@@ -450,6 +450,43 @@ GEMMA3_STAGE_CAPS_USD: Mapping[str, float] = {
     "11-judge": 1.0,
 }
 
+# ---- Phase 12: RLAIF (docs/13-rlaif.md) ---------------------------------------------------
+RLAIF_DIR = f"{DATA_ROOT}/rlaif"
+
+
+@dataclass(frozen=True)
+class RlaifConfig:
+    """Sampling, judging and DPO settings (docs/13-rlaif.md §3-§5)."""
+
+    temperature: float = 0.8           # content only: FormatConstraint keeps the syntax; drop to 0.6 if < 98% parse
+    min_format_validity: float = 0.98
+    headroom_k: int = 8
+    betas: tuple[float, ...] = (0.1, 0.3)
+    lr: Mapping[str, float] = None      # set below (frozen dataclass default)
+    alpha_sft: float = 0.2
+    replay_weight_slm: float = 1.0
+    pairs_per_step: int = 32
+    micro_pairs: int = 8
+    epochs: int = 1
+    evals: int = 2
+    # 12.1 go/no-go (pre-registered): best-of-8 grounded >= greedy + 0.10, or B2 any-refusal >= greedy B2 recall + 0.15
+    go_grounded_gain: float = 0.10
+    go_b2_gain: float = 0.15
+    sample_gpu: str = "L40S"
+    train_gpu: str = "H100"
+
+
+RLAIF = RlaifConfig(lr={"slm125": 2e-6, "gemma3": 1e-6})
+
+RLAIF_STAGE_CAPS_USD: Mapping[str, float] = {
+    "12.1-headroom-gpu": 0.6,
+    "12.1-judge": 1.2,
+    "12.3-sample-gpu": 1.0,
+    "12.4-labels": 6.0,
+    "12.5-dpo-gpu": 1.5,
+    "12.5-judge": 1.0,
+}
+
 STAGES: tuple[str, ...] = (
     "setup", "clean", "dedup", "tokenizer", "tokenize", "pretrain", "deploy", "sft",
 )

@@ -117,8 +117,12 @@ def decision_score(logits: torch.Tensor, ids: dict) -> torch.Tensor:
 class RaftConstraint(LogitsProcessor):
     """Per-row constrained decoding for a left-padded batch (all prompts end with `Source:`)."""
 
-    def __init__(self, ids: dict, prompt_width: int, ks: list[int], tau: float | None):
+    def __init__(self, ids: dict, prompt_width: int, ks: list[int], tau: float | None,
+                 sample_decision: bool = False, generator: torch.Generator | None = None):
+        """`sample_decision` (Phase 12 sampling): the decision is drawn from the model's own two-way
+        probability (refuse with probability s) instead of thresholded at tau."""
         self.ids, self.width, self.ks, self.tau = ids, prompt_width, ks, tau
+        self.sample_decision, self.generator = sample_decision, generator
         self.scores: list[float] = [float("nan")] * len(ks)
         self.choice: list[str | None] = [None] * len(ks)
 
@@ -133,7 +137,11 @@ class RaftConstraint(LogitsProcessor):
             if step == 0:
                 s = float(decision_score(scores[b], self.ids))
                 self.scores[b] = s
-                self.choice[b] = "none" if s >= self.tau else "pass"
+                if self.sample_decision:
+                    u = float(torch.rand((), generator=self.generator))
+                    self.choice[b] = "none" if u < s else "pass"
+                else:
+                    self.choice[b] = "none" if s >= self.tau else "pass"
                 keep = [self.ids["none"] if self.choice[b] == "none" else self.ids["pass"]]
             elif self.choice[b] == "pass" and step <= len(self.ids["forced"]):
                 keep = [self.ids["forced"][step - 1]]     # SLM: "age"; Gemma: "▁"
@@ -246,6 +254,93 @@ class CopyConstraint(LogitsProcessor):
         return scores
 
 
+class FormatConstraint(LogitsProcessor):
+    """Phase 12 sampling only (opt-in; greedy decoding never uses it). Keeps the RAFT target format
+    rigid so that temperature acts on content, never on syntax:
+    - after ` none`, the exact training refusal (`\nAnswer: <REFUSAL>`) and the stop token are forced;
+    - after ` Passage k`, only tokens that continue `\nQuote: "` or `\nAnswer:` are allowed (the quote
+      itself, its close and the `\nAnswer:` scaffold are CopyConstraint's job);
+    - in the answer, no token containing a newline (no training answer has one) and no special token;
+      the stop token is forced once the answer reaches `max_answer_chars` (training p99 214, max 674)."""
+
+    OPENERS = ("\nQuote: \"", "\nAnswer:")
+
+    def __init__(self, tok, prompt_width: int, vocab: list[str], ids: dict, max_answer_chars: int = 400):
+        self.tok, self.width, self.vocab, self.ids = tok, prompt_width, vocab, ids
+        self.max_answer_chars = max_answer_chars
+        fmt = format_for(tok)
+        full = tok.encode(" none\nAnswer: " + REFUSAL, add_special_tokens=False)   # the training tokenization
+        head = tok.encode(" none", add_special_tokens=False)
+        if full[:len(head)] != head:
+            raise RuntimeError("refusal target does not start with the ` none` token")
+        self.refusal_tail = full[len(head):] + [ids["stop"][0]]
+        self.stop = ids["stop"][0]
+        self.newline = [i for i, t in enumerate(vocab) if "\n" in t]
+        added = getattr(tok, "added_tokens_decoder", {}) or {}
+        self.special = sorted(set(ids["suppress"]) | set(ids["stop"][1:]) |       # + Gemma's <unusedN>, image tokens, ...
+                              {i for i, t in added.items() if (t.special or t.content.startswith("<unused")) and i not in ids["stop"][:1]})
+        self.fmt = fmt
+        self._open: dict[str, list[int]] = {}
+
+    def _restrict(self, scores, b, allowed):
+        keep = scores[b, allowed].clone()
+        scores[b] = -math.inf
+        scores[b, allowed] = keep
+
+    def _opener_ids(self, r: str) -> list[int]:
+        if r not in self._open:
+            ok = []
+            for i, t in enumerate(self.vocab):
+                if not t:
+                    continue
+                x = r + t
+                if self.OPENERS[0].startswith(x) or self.OPENERS[1].startswith(x) or \
+                        (x.startswith(self.OPENERS[1]) and "\n" not in x[len(self.OPENERS[1]):]):
+                    ok.append(i)
+            self._open[r] = ok
+        return self._open[r]
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if input_ids.shape[1] - self.width < 1:
+            return scores
+        for b in range(scores.shape[0]):
+            gen = input_ids[b, self.width:].tolist()
+            if gen[0] == self.ids["none"]:                       # refusal branch: force the training text
+                n = len(gen) - 1
+                if n < len(self.refusal_tail):
+                    self._restrict(scores, b, [self.refusal_tail[n]])
+                continue
+            text = self.tok.decode(gen, skip_special_tokens=True)
+            m = re.match(r"^ Passage \d(.*)$", text, re.S)
+            if not m:
+                continue                                         # decision / " Passage k" still being forced
+            body = m.group(1)
+            if "\nAnswer:" in body:
+                a = body.split("\nAnswer:", 1)[1]
+                if len(a) >= self.max_answer_chars:
+                    self._restrict(scores, b, [self.stop])
+                else:
+                    scores[b, self.newline] = -math.inf
+                    scores[b, self.special] = -math.inf
+                continue
+            if body.startswith(self.OPENERS[0]):
+                continue                                         # inside the quote: CopyConstraint
+            if self.OPENERS[0].startswith(body) or self.OPENERS[1].startswith(body):
+                self._restrict(scores, b, self._opener_ids(body))
+        return scores
+
+
+class TemperatureLast(LogitsProcessor):
+    """Temperature applied after every constraint (HF's own warpers could run before them and leave a
+    row with no allowed token)."""
+
+    def __init__(self, t: float):
+        self.t = t
+
+    def __call__(self, input_ids, scores):
+        return scores / self.t
+
+
 _VOCAB: dict[tuple, list[str]] = {}
 
 
@@ -298,6 +393,50 @@ def generate_batch(net, tok, prompts: list[str], ks: list[int], device: torch.de
 
 
 _OUT = re.compile(r'^Source: (none|Passage (\d))\n(?:Quote: "(.*)"\n)?Answer: (.*)$', re.S)
+
+
+@torch.no_grad()
+def sample_batch(net, tok, prompts: list[str], ks: list[int], passages: list[list[str]], device: torch.device,
+                 k: int = 4, temperature: float = 0.8, seed: int = 0, batch: int = 32, autocast=None,
+                 max_new: int = MAX_NEW_TOKENS) -> list[list[dict]]:
+    """Phase 12: K on-policy samples per prompt with the decision drawn from the model, copy-constrained
+    quotes, a rigid format (FormatConstraint) and temperature on content only. Returns, per prompt, K
+    dicts {'s', 'choice', 'text'} (text after `Source:`)."""
+    ids = decision_ids(tok)
+    vkey = (getattr(tok, "name_or_path", ""), len(tok))
+    if vkey not in _VOCAB:
+        _VOCAB[vkey] = [tok.decode([j]) for j in range(len(tok))]
+    vocab = _VOCAB[vkey]
+    cfg = GenerationConfig(do_sample=True, temperature=1.0, top_k=0, top_p=1.0, num_beams=1, min_new_tokens=0,
+                           max_new_tokens=max_new, eos_token_id=ids["stop"], pad_token_id=ids["pad"], bos_token_id=ids["bos"])
+    flat = [(i, j) for i in range(len(prompts)) for j in range(k)]
+    out: list[list[dict]] = [[] for _ in prompts]
+    gen_rng = torch.Generator().manual_seed(seed)
+    torch.manual_seed(seed)
+    net.eval()
+    for c in range(0, len(flat), batch):
+        part = flat[c:c + batch]
+        enc = [tok.encode(prompts[i], add_special_tokens=False) for i, _ in part]
+        width = max(len(e) for e in enc)
+        x = torch.full((len(enc), width), ids["pad"], dtype=torch.long)
+        mask = torch.zeros((len(enc), width), dtype=torch.long)
+        for r, e in enumerate(enc):
+            x[r, width - len(e):] = torch.tensor(e)
+            mask[r, width - len(e):] = 1
+        raft = RaftConstraint(ids, width, [ks[i] for i, _ in part], tau=0.5, sample_decision=True, generator=gen_rng)
+        procs = [raft, CopyConstraint(tok, width, [passages[i] for i, _ in part], vocab, eos_id=ids["stop"][0]),
+                 FormatConstraint(tok, width, vocab, ids), TemperatureLast(temperature)]
+        ctx = autocast() if autocast else torch.autocast("cpu", enabled=False)
+        with ctx:
+            y = net.generate(input_ids=x.to(device), attention_mask=mask.to(device), generation_config=cfg,
+                             logits_processor=LogitsProcessorList(procs))
+        for r, (i, _) in enumerate(part):
+            g = y[r, width:].tolist()
+            cut = [g.index(e) for e in ids["stop"] if e in g]
+            if cut:
+                g = g[:min(cut)]
+            out[i].append({"s": raft.scores[r], "choice": raft.choice[r], "text": tok.decode(g, skip_special_tokens=False)})
+    return out
 
 
 def parse_output(text_after_source: str) -> dict:

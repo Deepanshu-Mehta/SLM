@@ -14,6 +14,7 @@ Last updated: 2026-10-16
 | 6 | Deploy (HF repo + inference API + web frontend) | CPU | ~$0 (idle = $0) | **DONE**: model, API and website live |
 | 7 | Grounded SFT / RAFT (answer only from passages, refuse otherwise) | APIs + **GPU H100×1** | **≈ $14.70** (≈ $20 est.) | **DONE** 2026-10-21: `docs/08-raft.md` §13. Test: citation 0.90 / quote fidelity 1.00 / format 1.00 / over-refusal 0.05 met; grounded 0.32, hallucination 0.33, recall 0.78 missed |
 | 8 | Release SLM-125M-RAFT: HF model, `POST /answer`, website `/grounded` | Modal CPU, Vercel | $0 | **DONE** 2026-10-22: `docs/09-raft-release.md` |
+| 9 | Gemma 2 2B on the same grounded data: is the gap data or model size? (LoRA bf16; full-FT control at 5K; no QLoRA) | **GPU H100×1**, L40S, APIs | ≈ $9.3 est. (cap $13.3) | **PLAN** 2026-10-26: `docs/10-gemma.md`; awaiting approval and the Gemma HF license |
 
 ---
 
@@ -510,3 +511,4 @@ Each worker calls `volume.commit()` before returning.
 | 2026-10-21 | 7 | **7.8 ✅ (API $6.26, GPU $1.82; Phase 7 ≈ $14.44):** 20K train rows (V3 near-miss check; probe-document fix, E-34; audit OK). Judged dev curve 0.215→0.349 (2K→20K). **Final test:** grounded 0.316, hallucination 0.325, recall 0.780 (all ❌); over-refusal 0.048, citation 0.903, quote fidelity 0.998, format 1.000 (✅); bits/byte +0.009 ✅. Misses recorded, not lowered. 0 containers. |
 | 2026-10-21 | 7 | **7.8b** answer-copy decoding not adopted (E-36; GPU overrun $0.07, C-15). **7.9: Phase 7 closed** (≈ $14.70). Next: Phase 8: publish `slm-125m-raft`, add a grounded `/answer` endpoint, add a RAFT section to the website (user-approved). |
 | 2026-10-22 | 8 | **Phase 8 ✅ ($0):** `raft_decode.py` shared by eval/API/HF; **HF `Deepanshu027/slm-125m-raft`** (public, card from artifacts, Hub download verified); **`POST /answer`** on the Modal API (public URL verified); **website `/grounded`** (live playground + 8 visual chapters; checked in a real browser, desktop/phone, light/dark; Vercel prod verified). `docs/09-raft-release.md`. |
+| 2026-10-26 | 9 | **Phase 9 planned** (`docs/10-gemma.md`, $0): Gemma 2 2B trained on the same 20,340 rows and scored on the same dev/test/J1, with the reading of the result pre-registered. LoRA (bf16 base, r 32, all linear layers) is the main method, with a full-fine-tuning control at 5K; QLoRA not used; quantization measured at inference only. Measured: Gemma rows avg 641 tokens (max 951 prompt); decision tokens `▁none`/`▁Passage` single, digits split; Gemma repos gated (403 for the current token). |

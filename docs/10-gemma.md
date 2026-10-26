@@ -1,6 +1,8 @@
 # Phase 9: Gemma 2 2B on the same grounded data (comparison with SLM-125M-RAFT)
 
-**Status: PLAN (written 2026-10-26, before any code or spend). Not approved yet.**
+**Status: APPROVED, LoRA only (D-30, 2026-10-26): "start with gemma2B raft-using lora".** The full
+fine-tuning control, Gemma 3 270M, the quantization check and best-of-8 are deferred, not dropped.
+9.1 (code, $0) in progress; every GPU step still stops at its own gate.
 
 Phase 7 left three gated targets missed (test, `copy2`, τ 0.7): grounded accuracy 0.316 (target 0.60),
 hallucination 0.325 (0.15) and refusal recall 0.780 (0.80). The model cites the right passage 90% of
@@ -45,11 +47,12 @@ accuracy is reported both raw and on the items it could not answer closed-book.
 - adapters in fp32, frozen base in bf16, bf16 autocast;
 - AdamW, weight decay 0 on the adapters, gradient clip 1.0;
 - the same schedule as Phase 7: 3% warmup, cosine to 10%;
-- batch 64 sequences, 3 epochs (Phase 7's recipe; LoRA degrades at large batch sizes, and 64 is
-  moderate);
+- **52 SFT rows per optimizer step** (Phase 7's 64-sequence batch held 52 SFT rows and 12 replay
+  windows; with no replay, 52 keeps the SFT batch identical), as micro-batches of 13 × 4, 3 epochs.
+  LoRA degrades at large batch sizes, and 52 is moderate;
 - LR swept over {1e-4, 3e-4} in the pilot (9.4).
 
-**Full fine-tuning control:** LR 1e-5, the same schedule and batch. The tied embeddings are trained
+**Full fine-tuning control (deferred, D-30):** LR 1e-5, the same schedule and batch. The tied embeddings are trained
 (as SLM-125M's were).
 
 **Quantization is for inference only, measured rather than assumed (9.7, optional):**
@@ -138,7 +141,7 @@ It carries a caveat: case law and EDGAR filings are public and may be in Gemma's
   decision ids, the copy constraint on Gemma tokens, a target-only loss equal to the full-logit loss,
   LoRA merge equivalence, and the resume path.
 
-### 9.2 Container probe (H100, ≈ $0.15, `--max-usd 0.3`)
+### 9.2 Container probe (H100, ≈ $0.3, `--max-usd 0.5`)
 - Load `gemma-2-2b`.
 - Compare `eager` and SDPA logits and speed on 32 dev prompts.
 - Measure tokens/s and peak memory for LoRA and full fine-tuning at the chosen micro-batch.
@@ -157,16 +160,14 @@ It carries a caveat: case law and EDGAR filings are public and may be in Gemma's
   The J1 judge compares them with the references. This measures how much Gemma already knows about
   the test documents.
 
-### 9.4 Pilot at 5K: LoRA vs full fine-tuning (H100, ≈ $3.0, `--max-usd 4.0`)
+### 9.4 Pilot at 5K: two LoRA learning rates (H100, ≈ $2.0, `--max-usd 3.0`)
 - **Data:** `select_mix(5,000, 0.35)` from the 20K pool. It is the same draw as Phase 7's 5K curve
   point (0.273 judged grounded for SLM-125M).
-- **Arms:** LoRA LR 1e-4, LoRA LR 3e-4, full fine-tuning LR 1e-5.
+- **Arms:** LoRA LR 1e-4 and LoRA LR 3e-4 (the full fine-tuning arm is deferred, D-30).
 - Each arm has 3 epochs and 2 evals (mid-run and final), with `keep="select"`.
-- **J1 on the selected dev outputs of all three arms.**
+- **J1 on the selected dev outputs of both arms.**
 - **Pre-registered choice for 9.5:**
   - the LoRA LR with the higher dev J1 grounded accuracy among gate-passing arms;
-  - full fine-tuning replaces LoRA only if it beats the best LoRA arm by > 0.03 dev J1 grounded
-    **and** passes the bits/byte gate.
   - If no arm passes the gate, stop and bring it back.
 
 ### 9.5 Scale to 20K, final test (H100, ≈ $4.3, `--max-usd 6.0`)
@@ -215,18 +216,18 @@ Estimates from FLOPs, before the 9.2 probe. Assumptions:
 
 | Step | GPU | Estimate | `--max-usd` |
 |---|---|---|---|
-| 9.2 probe | H100 | ≈ $0.15 | 0.3 |
+| 9.2 probe | H100 | ≈ $0.3 | 0.5 |
 | 9.3 baselines | L40S | ≈ $0.6 | 1.0 |
-| 9.4 pilot (3 arms × 5K) | H100 | ≈ $3.0 | 4.0 |
+| 9.4 pilot (2 LoRA arms × 5K) | H100 | ≈ $2.0 | 3.0 |
 | 9.5 20K + test | H100 | ≈ $4.3 | 6.0 |
-| J1: pilot dev ×3, final dev, test ×2, zero-shot, closed-book (≈ 6,500 items) | — | ≈ $1.2 | stage cap 2.0 |
-| **Core total** | | **≈ $9.3** | **cap $13.3** |
+| J1: pilot dev ×2, final dev, test ×2, zero-shot, closed-book (≈ 6,000 items) | — | ≈ $1.1 | stage cap 2.0 |
+| **Core total (LoRA only, D-30)** | | **≈ $8.4** | **cap $12.5** |
 | 9.6 Gemma 3 270M (optional) | H100 | ≈ $1.0 | 1.5 |
 | 9.7 quantization (optional) | L40S | ≈ $0.3 | 0.5 |
 | 9.8 best-of-8 (optional) | L40S | ≈ $0.6 (+ J1 ≈ $0.2) | 1.0 |
 
-**Cheaper variant (≈ $8.0):** drop the full fine-tuning arm. LoRA would then be the only Gemma
-method, and the "LoRA held it back" objection would stay open.
+**Chosen (D-30): LoRA only.** Without the full fine-tuning arm, the objection "LoRA held Gemma back"
+stays open; the 5K pilot shows how far LoRA gets, and the arm can still be run later (≈ $1.2).
 
 Every GPU step stops at its own gate with the measured estimate, `--max-usd`, duration, GPU count,
 steps and resume strategy. Afterwards, `modal container list` must show 0.
@@ -253,3 +254,68 @@ steps and resume strategy. Afterwards, `modal container list` must show 0.
   scans get a precomputed index (same behaviour, checked by the 125M equivalence test).
 - **The pilot LR grid is two points:** if the better LR is at the edge (3e-4 best and still
   improving), one extra 5K LoRA arm at 6e-4 (≈ $0.8) is proposed, not run automatically.
+
+## 8. Results
+
+### 9.1 Port the code: DONE (2026-10-26, $0)
+**Code:**
+- **`raft_decode.py`:**
+  - a per-family `Format` (SLM, GEMMA) picked from the tokenizer by `format_for`;
+  - `decision_ids` derives every id from the tokenizer (decision tokens, the tokens forced between
+    " Passage" and the digit, suppressed and stop ids). Gemma: `▁none` 8031 / `▁Passage` 81975, forced
+    `▁`, digits `1`–`4`, suppress `<pad> <bos> <unk> <mask> <start_of_turn>`, stop `<eos> <end_of_turn>`;
+  - the forced-scaffold vocabulary scan is memoised per remaining suffix (same result, once per batch);
+  - the single-token vocabulary cache is now keyed per tokenizer.
+- **`eval_forgetting.score_casehold`:** optional `prefix_id` and `softcap`. The defaults are the SLM
+  behaviour.
+- **`gemma_sft.py`:**
+  - LoRA via PEFT 0.13.2, adapters fp32 over the bf16 base;
+  - target-only soft-capped logits and a chunked CE;
+  - the training loop with the sft.py loss contract and keep="select";
+  - teacher-forced and prompt-end decision scores;
+  - tokenizer-independent held-out bits/byte;
+  - the instruct few-shot and closed-book prompts.
+- **`gemma_app.py`:**
+  - its own image (torch 2.5.1, transformers 4.46.3, peft 0.13.2, accelerate 1.1.1);
+  - `fetch` (CPU) and `probe` / `baselines` / `pilot` / `full` (GPU, `--confirm`, per-stage caps);
+  - 9.4 and 9.5 refuse to start until the 9.2 probe timings are recorded in `config.GEMMA`.
+- **`config.py`:** `GemmaConfig` with pinned Hub revisions (base `c5ebcd4…`, instruct `299a856…`) and
+  `GEMMA_STAGE_CAPS_USD`.
+
+**Two plan details changed while coding:**
+- **52 SFT rows per step**, not 64 sequences. That is Phase 7's SFT share of its batch, so the SFT
+  batch stays identical without replay (§2).
+- **The probe cap went from $0.3 to $0.5.** Counting container start and two 5 GB model loads, the
+  probe is ≈ 4 H100-minutes, not 2, so it measures subsets and extrapolates.
+
+**Validation:**
+- **Phase 7 suite: 77/77** with the ported `raft_decode.py`.
+- **`smoke_gemma.py`: 38/38.**
+  - **Format, all 21,839 stored rows:**
+    - one `<bos>` first and `<eos>` last;
+    - every target starts with exactly the decision tokens the constraint forces;
+    - longest row 985 tokens (≤ 1,024);
+    - no Gemma control strings in any row;
+    - the instruct prompt is 1,605 tokens.
+  - **SLM unchanged:**
+    - the committed vs the working `raft_decode.py` on the released weights (CPU): 24 test rows, plain
+      and `copy2`, identical text, choice and s;
+    - `answer()` identical;
+    - CaseHOLD scorer identical on all 60 log-probs.
+    - Reported, not gated: CPU fp32 matches the saved H100 bf16 generations on 23/24.
+  - **Copy constraint on Gemma's 256K vocabulary:** 12 random walks on real dev passages all end in a
+    verbatim quote of ≤ 240 characters, then the forced `\nAnswer:`.
+  - **Tiny random Gemma 2** (real tokenizer, CPU):
+    - target-only CE equals the HF full-logit (soft-capped) CE;
+    - teacher-forced s = prompt-end s = HF forward;
+    - held-out bits/byte equals a hand computation;
+    - keep="select" rule;
+    - zero-init LoRA leaves outputs unchanged;
+    - only fp32 adapters train;
+    - the loss falls;
+    - the adapter state round-trips; runs are deterministic from the same init;
+    - merge matches (max 6e-7);
+    - generation forces the decision and a valid digit.
+  - **Gates:** refuse without `--confirm` and over the cap.
+- **Environment:** the first combined run was killed for memory on the 8 GB laptop (full 256K-vocab
+  logits). The LoRA comparisons now use a 2 × 64 slice.

@@ -89,8 +89,9 @@ def fetch_casehold(cache: Path) -> list[dict]:
     return rows
 
 
-def _continuation_ids(tok, prefix: str, ending: str, max_len: int) -> tuple[list[int], int]:
-    """Token ids for <|eos|> + prefix + ending, and the index where the ending starts.
+def _continuation_ids(tok, prefix: str, ending: str, max_len: int,
+                      prefix_id: int = M.PROMPT_PREFIX_TOKEN_ID) -> tuple[list[int], int]:
+    """Token ids for <|eos|> (Gemma: <bos>, via `prefix_id`) + prefix + ending, and the index where the ending starts.
 
     Uses character offsets of the joint encoding, so a token spanning the boundary counts
     as part of the ending. The prefix is left-truncated to fit max_len.
@@ -103,15 +104,17 @@ def _continuation_ids(tok, prefix: str, ending: str, max_len: int) -> tuple[list
     if room < 1:
         raise ValueError("ending alone exceeds the context window")
     keep_from = max(0, start - room)
-    ids = [M.PROMPT_PREFIX_TOKEN_ID] + ids[keep_from:]
+    ids = [prefix_id] + ids[keep_from:]
     return ids, 1 + (start - keep_from)
 
 
 @torch.no_grad()
 def score_casehold(net, tok, items: list[dict], device: torch.device,
-                   autocast: Autocast = no_autocast, items_per_batch: int = 4, return_scores: bool = False) -> dict:
+                   autocast: Autocast = no_autocast, items_per_batch: int = 4, return_scores: bool = False,
+                   prefix_id: int = M.PROMPT_PREFIX_TOKEN_ID, softcap: float | None = None) -> dict:
     """Zero-shot CaseHOLD accuracy (acc, byte-normalised acc_norm, PMI). With `return_scores`, also the
-    per-item log-probs of the 5 endings with the citing context ('cond') and after "(" ('null')."""
+    per-item log-probs of the 5 endings with the citing context ('cond') and after "(" ('null').
+    Phase 9 (Gemma 2): `prefix_id` = <bos>, `softcap` = the final logit soft-cap (30)."""
     net.eval()
     weight = net.get_output_embeddings().weight
     hits = hits_norm = hits_pmi = 0
@@ -123,12 +126,12 @@ def score_casehold(net, tok, items: list[dict], device: torch.device,
         for it in batch:
             prefix = it["context"].split(PLACEHOLDER)[0]
             for ending in it["endings"]:
-                ids, start = _continuation_ids(tok, prefix, ending, config.SEQ_LEN)
+                ids, start = _continuation_ids(tok, prefix, ending, config.SEQ_LEN, prefix_id)
                 seqs.append(ids)
                 starts.append(start)
                 nbytes.append(len(ending.encode("utf-8")))
             for ending in it["endings"]:
-                ids, start = _continuation_ids(tok, NULL_PREFIX, ending, config.SEQ_LEN)
+                ids, start = _continuation_ids(tok, NULL_PREFIX, ending, config.SEQ_LEN, prefix_id)
                 seqs.append(ids)
                 starts.append(start)
                 nbytes.append(len(ending.encode("utf-8")))
@@ -143,6 +146,8 @@ def score_casehold(net, tok, items: list[dict], device: torch.device,
         for i, s in enumerate(seqs):
             pos = torch.arange(starts[i] - 1, len(s) - 1, device=device)   # predict start..end
             logits = hidden[i, pos].float() @ weight.float().T
+            if softcap:
+                logits = torch.tanh(logits / softcap) * softcap
             logp = torch.log_softmax(logits, dim=-1)
             targets = x[i, pos + 1]
             scores.append(float(logp.gather(1, targets[:, None]).sum()))

@@ -319,6 +319,56 @@ class SFTConfig:
 
 SFT = SFTConfig()
 
+
+# ---- Phase 9: Gemma 2 2B on the same grounded data (docs/10-gemma.md) -----------------
+GEMMA_DIR = f"{DATA_ROOT}/gemma"
+
+
+@dataclass(frozen=True)
+class GemmaConfig:
+    """LoRA recipe and fixed choices (docs/10-gemma.md §2). Only the LR is swept (D-30: LoRA only)."""
+
+    base: str = "google/gemma-2-2b"
+    base_revision: str = "c5ebcd40d208330abc697524c919956e692655cf"       # pinned 2026-10-26 (stored in fp32)
+    instruct: str = "google/gemma-2-2b-it"
+    instruct_revision: str = "299a8560bedf22ed1c72a8a11e7dce4a7f9f51f8"
+    attn: str = "eager"                 # Gemma 2's attention soft-cap is not applied under SDPA (checked in 9.2)
+    lora_rank: int = 32
+    lora_alpha: int = 32
+    lora_dropout: float = 0.0
+    lora_targets: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+    pilot_lrs: tuple[float, ...] = (1e-4, 3e-4)
+    pilot_size: int = 5_000             # the same select_mix draw as Phase 7's 5K curve point
+    pilot_evals: int = 2
+    full_size: int = 20_000             # as 7.8 (select_mix(20,000, 0.35) from the 20,340-row pool)
+    full_evals: int = 4
+    epochs: int = 3
+    sft_rows_per_step: int = 52         # Phase 7's SFT rows per step (64 sequences minus 12 replay windows)
+    micro_batch: int = 13               # 4 micro-batches per step; re-checked by the 9.2 memory probe
+    weight_decay: float = 0.0           # on the adapters
+    grad_clip: float = 1.0
+    gen_batch: int = 32
+    max_len: int = 1_024                # longest train row: 985 Gemma tokens (measured); rows are checked
+    gpu: str = "H100"
+    eval_gpu: str = "L40S"
+    seed: int = 1337
+    # measured by the 9.2 probe (0 = not yet; 9.4/9.5 refuse to start): seconds per optimizer step at
+    # micro_batch, and seconds per in-training eval (held-out bits/byte + dev copy2 generation + teacher-forced)
+    probe_step_s: float = 0.0
+    probe_eval_s: float = 0.0
+
+
+GEMMA = GemmaConfig()
+
+# Spend caps per Phase 9 step, USD (docs/10-gemma.md §5; LoRA-only variant, D-30).
+GEMMA_STAGE_CAPS_USD: Mapping[str, float] = {
+    "9.2-probe": 0.5,
+    "9.3-baselines": 1.0,
+    "9.4-pilot": 3.0,
+    "9.5-full": 6.0,
+    "9-judge": 2.0,
+}
+
 STAGES: tuple[str, ...] = (
     "setup", "clean", "dedup", "tokenizer", "tokenize", "pretrain", "deploy", "sft",
 )

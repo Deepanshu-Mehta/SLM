@@ -35,8 +35,10 @@ from teacher import DeepSeek, GeminiBatch, Job, Ledger, load_env
 T = config.TEACHER
 LOCAL = Path(".smoke/raft")
 STAGE_CAP = {"trial": "7.3-trial", "pilot": "7.4-pilot-data", "pilot-eval": "7.7-judge", "scale": "7.8-scale-data",
-             "gemma": "9-judge"}              # Phase 9 (docs/10-gemma.md): J1 on Gemma outputs, local files in .smoke/gemma
+             "gemma": "9-judge",              # Phase 9 (docs/10-gemma.md): J1 on Gemma outputs, local files in .smoke/gemma
+             "slm500": "10-judge"}            # Phase 10 (docs/11-slm500m-raft.md): local files in .smoke/slm500m
 GEMMA_LOCAL = Path(".smoke/gemma")
+SLM500_LOCAL = Path(".smoke/slm500m")
 TRIAL_PLAN = {"G1": 2 / 3, "G2": 1 / 6, "G3": 1 / 6}
 GEMINI_MAX_TOKENS = 1_024              # Gemini counts thinking inside max_output_tokens
 GEMINI_CHECK_MAX_TOKENS = 384          # trial 7.3: check output+thoughts median 58, max 202 tokens
@@ -68,13 +70,13 @@ AUDIT_MAX_DISAGREE = 0.15
 
 
 def sdir(stage: str) -> Path:
-    d = GEMMA_LOCAL if stage == "gemma" else LOCAL / stage
+    d = {"gemma": GEMMA_LOCAL, "slm500": SLM500_LOCAL}.get(stage, LOCAL / stage)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def ledger(stage: str) -> Ledger:
-    caps = {**config.RAFT_STAGE_CAPS_USD, **config.GEMMA_STAGE_CAPS_USD}
+    caps = {**config.RAFT_STAGE_CAPS_USD, **config.GEMMA_STAGE_CAPS_USD, **config.SLM500_STAGE_CAPS_USD}
     return Ledger(sdir(stage) / "ledger.json", caps[STAGE_CAP[stage]])
 
 
@@ -882,13 +884,14 @@ def score_eval(rows: dict[str, dict], gens: list[dict], verdicts: dict[str, dict
 
 
 def _eval_inputs(stage: str = "pilot-eval") -> tuple[dict[str, dict], dict[str, list[dict]]]:
-    if stage == "gemma":                    # Phase 9: every copy2 output and every test output, keyed '{step}/{file}'
+    if stage in ("gemma", "slm500"):        # Phases 9-10: every copy2 output and every test output, keyed '{step}/{file}'
         rows = {r["id"]: r for g in ("dev", "test") for r in jsonl(LOCAL / "scale" / "datasets" / f"{g}.jsonl")}
-        gens = {f"{f.parent.name}/{f.stem}": jsonl(f) for d in ("baselines", "pilot", "full")
-                for f in sorted((GEMMA_LOCAL / d).glob("*.jsonl"))
+        root, dirs = (GEMMA_LOCAL, ("baselines", "pilot", "full")) if stage == "gemma" else (SLM500_LOCAL, ("pilot", "full", "control"))
+        gens = {f"{f.parent.name}/{f.stem}": jsonl(f) for d in dirs
+                for f in sorted((root / d).glob("*.jsonl"))
                 if f.stem.endswith("_copy2") or f.stem.startswith("test_")}
         if not gens:
-            raise SystemExit(f"no generations under {GEMMA_LOCAL}: run gemma_app.py first")
+            raise SystemExit(f"no generations under {root}")
         return rows, gens
     if stage == "scale":                    # 7.8: dev copy2 per curve point + test plain/copy2 of the best run
         d = LOCAL / "scale" / "eval"

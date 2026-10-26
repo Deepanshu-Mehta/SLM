@@ -398,6 +398,9 @@ class Slm500Config:
     # measured by the 10.4 probe (0 = not yet; 10.5/10.6 refuse to start)
     probe_step_s: float = 0.70          # 10.4: 0.69 s/step at micro 32 (compiled), peak 56 GB
     probe_eval_s: float = 60.0          # 10.4: bpb 7 s + dev copy2 generation ~45 s (base-model upper bound) + teacher-forced 2 s
+    # the author's 125M has SLM-125M's geometry: 7.8's measured estimate (raft_gpu_app.full_run: 0.3 s/step, 35 s/eval)
+    control_step_s: float = 0.30
+    control_eval_s: float = 35.0
 
 
 SLM500 = Slm500Config()

@@ -1,7 +1,9 @@
 # Phase 10: RAFT on a 500M model pretrained on the same corpus (does 4× parameters help?)
 
-**Status: PLAN (written 2026-10-27, before any spend). Step 10.0 (investigation, $0) is done; nothing
-else has run.** Every GPU step stops at its own gate.
+**Status: DONE (2026-10-27; ≈ $5.5).** The 500M with RAFT (20K, LR 2e-5) scores test grounded **0.346**,
+against SLM-125M's 0.316 (Δ +0.030 < +0.05). Pre-registered reading: 4× parameters on the same corpus
+buys almost nothing; Gemma's gain came from pretraining scale. No dev/test overlap flagged (E-40, E-41).
+The author's-125M control is flagged (gate fallback to step 144). §8 has the details.
 
 Phase 9 showed SLM-125M's grounded-QA gap is model size, not data: Gemma 2 2B + LoRA met all seven targets
 (test grounded 0.912) on rows where SLM-125M-RAFT reached 0.316. But Gemma differs in two ways at once,
@@ -277,3 +279,101 @@ against the reference, with answers containing a shot answer excluded; determini
 - **10.6 full ≈ $2.3** (1,155 steps, 8 evals, test, guards, export; cap $4.5);
 - **10.7 control ≈ $0.9**.
 - These are below the plan (§6): the step is 0.69 s, not 1.25 s.
+
+### 10.5 Pilot: DONE (2026-10-27; GPU $1.42 of $3.00; J1 $0.21)
+**Held-out bits/byte change and proxy score at evals 73 / 146 / 219 / 291:**
+- **LR 5e-5:** +0.0265 / +0.0254 / +0.0247 / +0.0230. **No eval passes the gate**, so the fallback kept
+  step 291 (dev J1 grounded 0.309).
+- **LR 2e-5:** +0.017 / +0.014 / +0.013 / +0.014, all pass. Selected step 219 (proxy 0.201).
+- **Dev J1 (`copy2`):** grounded **0.284**, hallucination 0.279, recall 0.839 (B2 0.58), over-refusal
+  0.145, citation 0.868.
+- For comparison, SLM-125M at 5K (7.8): grounded 0.273, hallucination 0.327, recall 0.823.
+- **Pre-registered choice: LR 2e-5**, the only gate-passing arm.
+
+### 10.7 Control: the author's 125M, LR 5e-5 (2026-10-27; GPU $1.08 of $1.50): FLAGGED, not interpretable
+**Run notes:** the first launch stopped itself before training ($0.15): its estimate used the 500M's step
+time. The control now uses 7.8's measured 125M timings.
+
+**What happened:**
+- **No eval passed the gate** (+0.026 to +0.043 at every one of the 9 evals), so the fallback kept the
+  lowest bits/byte: **step 144 of 1,155**, barely trained.
+- Dev proxy: grounded 0.073, citation 0.29. Test AUROC 0.786, CaseHOLD −5.3.
+- Its last eval would have scored a proxy of 0.271, but the rule didn't allow it.
+
+**Why:** the gate windows are probably **training text** for the author's models (window-level split),
+and fine-tuning erodes memorised text faster than held-out text. So the gate is stricter for them than
+for SLM-125M. 10.1 found this model's extra familiarity with our held-out text to be significant.
+
+**Status:** not judged with J1 (≈ $0.40 saved), and **not used for the size comparison.** A rerun at the
+500M's LR 2e-5 (≈ $0.9) would make it usable.
+
+### 10.6 The 500M at 20K, LR 2e-5: DONE (2026-10-27; GPU $1.96 of $4.50; J1 $0.51)
+**Evals (step: bits/byte change, proxy score):**
+- 144: +0.0165, 0.109;
+- 288: **+0.0225 (fails the gate)**, 0.239;
+- **432: +0.0175, 0.337 (selected)**;
+- 576: +0.018, 0.231;
+- 720: +0.017, 0.330;
+- 864: +0.017, 0.290;
+- 1,008: +0.017, 0.324;
+- 1,152: +0.017, 0.299.
+
+So the selected step 432 is the highest proxy score among gate-passing evals, **not** a gate cut-off. The
+proxy plateaus after ≈ 1/3 of training.
+
+**Test (1,000 items, τ 0.75 from dev, J1, fully judged):**
+
+| Test | Target | **500M, 20K, `copy2`** | 500M, plain | **SLM-125M-RAFT, 20K, `copy2`** | SLM-125M, plain | Gemma 2 2B + LoRA, 5K, `copy2` |
+|---|---|---|---|---|---|---|
+| Grounded accuracy | ≥ 0.60 | **0.346** ❌ | 0.404 | **0.316** ❌ | 0.336 | 0.912 |
+| Hallucination | ≤ 0.15 | **0.307** ❌ | 0.469 | 0.325 ❌ | 0.539 | 0.086 |
+| Refusal recall (B1 / B2 / B3) | ≥ 0.80 | **0.750** ❌ (0.85 / 0.47 / 1.00) | 0.750 | 0.780 ❌ | 0.780 | 0.900 |
+| Over-refusal (A) | ≤ 0.20 | 0.046 ✅ | 0.046 | 0.048 | 0.048 | 0.006 |
+| Citation accuracy | ≥ 0.80 | 0.895 ✅ | 0.891 | 0.903 | 0.899 | 0.980 |
+| Quote fidelity | ≥ 0.90 | 0.998 ✅ | 0.492 | 0.998 | 0.391 | 0.991 |
+| Format validity | ≥ 0.99 | 1.000 ✅ | 0.997 | 1.000 | 0.998 | 0.993 |
+| Paired consistency | | 0.320 | 0.373 | 0.273 | 0.300 | 0.887 |
+| Decision AUROC | | 0.922 | | 0.923 | | 0.990 |
+| Held-out bits/byte change | ≤ +0.02 | +0.0175 ✅ | | +0.009 | | +0.0198 |
+| CaseHOLD PMI change | reported | **−1.5** | | −4.8 | | −0.1 |
+
+**Pre-registered reading (§4):**
+- **Δ grounded (500M − SLM-125M) = +0.030 on `copy2`, below +0.05.** So 4× parameters on the same
+  ≈ 2B-token corpus buys almost nothing for grounded QA, and **Gemma's gain came from its pretraining scale
+  and diversity, not parameter count alone.**
+- The difference is about 1 standard error (500 A items, SE ≈ 0.021).
+- The prediction (+0.05 to +0.15) was too optimistic.
+- The test set stays the headline: no overlap flagged in 10.1, 0.4% closed-book at the base level (10.4).
+
+**Supporting detail:**
+- **Decoding:** without the copy constraint the 500M gains more (plain 0.404 vs SLM-125M's 0.336, +0.068),
+  but plain decoding invents quotes (fidelity 0.49) and hallucinates more (0.47). Copy constraint costs the
+  500M 0.06 grounded accuracy, as it cost Gemma 0.024. It helps small models that invent quotes, but it can
+  force a wrong verbatim span.
+- **Near misses get worse:** B2 recall is 0.47 (SLM-125M 0.56–0.61).
+- **Forgetting:** CaseHOLD forgetting is much smaller (−1.5 vs −4.8).
+- **Dev learning curve (J1, `copy2`):**
+  - 500M: 0.284 at 5K, 0.396 at 20K;
+  - SLM-125M: 0.273 at 5K, 0.349 at 20K;
+  - the gap widens with data (+0.011 → +0.047), so the 500M uses more data a little better.
+
+**Saved:** `/data/slm500m/runs/base500/full/` holds `n20000-lr2e-05.pt`, `hf/` (export with corrected
+bos/eos ids, τ 0.75), `final.json` and the per-mode test files.
+
+### Phase 10 summary (2026-10-27; ≈ $5.5)
+**Spend:**
+- GPU $4.74: probe $0.28, pilot $1.42, control $1.08, 20K $1.96;
+- J1 $0.72;
+- Modal CPU: cents;
+- all within caps.
+
+**Deviations:**
+- per-model step timings for the control;
+- the control flagged and not judged;
+- the closed-book check uses a token-F1 rule instead of J1 (base models echo the shots);
+- the probe was trimmed and its cap raised to $0.80 before launch.
+
+**Not run:**
+- the fresh test set (10.8; not triggered);
+- 10.9a/b (their QA → instruction → DPO chain);
+- the control rerun at LR 2e-5.

@@ -550,6 +550,21 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   flagged and the original test set stays the headline. The author's 125M (10 epochs) shows a small,
   significant overlap.
 
+### E-42 · Phase 10: RAFT on slm-500m-base vs SLM-125M (2026-10-27; GPU $4.74, J1 $0.72)
+- **Pilot 5K:**
+  - LR 5e-5 fails the gate (+0.023 to +0.027);
+  - LR 2e-5 passes (+0.013 to +0.017): dev J1 grounded 0.284 (SLM-125M at 5K: 0.273).
+- **20K at LR 2e-5:** selected step 432 (best proxy among gate-passing evals; the proxy plateaus after
+  ≈ 1/3 of training).
+- **Test, `copy2`:** grounded **0.346** (SLM-125M 0.316), hallucination 0.307 (0.325), recall 0.750 (0.780;
+  B2 0.47), over-refusal 0.046, citation 0.895, quote fidelity 0.998, AUROC 0.922 (0.923).
+  - Bits/byte +0.0175; CaseHOLD −1.5 (SLM-125M −4.8).
+  - Plain decoding: grounded 0.404 (SLM-125M 0.336).
+- **Pre-registered reading:** Δ +0.030 < +0.05, so 4× parameters on the same corpus buys almost nothing;
+  Gemma's gain came from pretraining scale and diversity.
+- **Control** (the author's 125M, LR 5e-5): no eval passed the gate (+0.026 to +0.043), and the fallback
+  kept step 144. **Not interpretable**: the gate windows are probably its training text.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

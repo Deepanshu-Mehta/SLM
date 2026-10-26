@@ -377,7 +377,8 @@ def _runs(max_usd: float, key: str, which: str, runs: list[dict], test: bool) ->
         if rk in done:
             continue
         plan = sft.make_plan(run["n"], config.SFT.epochs, config.SEQ_LEN, micro=G.micro_batch)
-        est = (plan.total_steps * G.probe_step_s + (run["evals"] + 2) * G.probe_eval_s + 90) * _rate()
+        step_s, eval_s = (G.control_step_s, G.control_eval_s) if key == "control125" else (G.probe_step_s, G.probe_eval_s)
+        est = (plan.total_steps * step_s + (run["evals"] + 2) * eval_s + 90) * _rate()
         if spent() + est > max_usd:
             log(f"budget: run {rk} (est ${est:.2f}) would cross --max-usd {max_usd}; stopping")
             break
@@ -429,7 +430,7 @@ def _runs(max_usd: float, key: str, which: str, runs: list[dict], test: bool) ->
         if part.exists():
             tgens[mode] = [json.loads(ln) for ln in part.read_text().splitlines() if ln.strip()]
             continue
-        if spent() + 2 * G.probe_eval_s * _rate() > max_usd:
+        if spent() + 2 * (G.control_eval_s if key == "control125" else G.probe_eval_s) * _rate() > max_usd:
             log(f"budget: stopping before test {mode}")
             return {**out, "status": "budget_stop", "spent_usd": spent()}
         g = E.generate_batch(raw, tok, [r["prompt"] for r in test_rows], [len(c) for c in tcps], device, tau=top["tau"]["tau"],

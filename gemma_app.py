@@ -320,9 +320,10 @@ def baselines_check(confirm: bool = False, max_usd: float = 1.0):
 
 
 # ------------------------------------------------------------------------ 9.4 and 9.5
-def _lora_runs(max_usd: float, which: str, runs: list[dict]) -> dict:
+def _lora_runs(max_usd: float, which: str, runs: list[dict], test_key: str | None = None) -> dict:
     """Shared body of 9.4 (pilot) and 9.5 (full): base guards (once), then each LoRA run with
-    keep='select', tau on dev, dev generations; for 9.5 also test, guards, adapter and merged export."""
+    keep='select', tau on dev, dev generations; for 9.5 also test, guards, adapter and merged export.
+    `test_key` (D-32): no training; the test pass on that finished pilot run (adapter saved, no merged copy)."""
     import numpy as np
     import torch
 
@@ -416,38 +417,50 @@ def _lora_runs(max_usd: float, which: str, runs: list[dict]) -> dict:
     rows = [json.loads(ln) for ln in res_path.read_text().splitlines() if ln.strip()] if res_path.exists() else []
     out = {"status": "completed", "runs": rows, "base_guards": {k: v for k, v in base.items() if k != "casehold"} |
            {"casehold_pmi": base["casehold"]["acc_pmi"]}}
-    if which != "full" or not rows:
+    if (which != "full" and test_key is None) or not rows:
         return {**out, "spent_usd": spent()}
 
-    # 9.5: test once, guards, adapter + merged export
-    top = rows[0]
-    final_path = run_dir / "final.json"
+    # 9.5 (or the D-32 5K test): test once, guards, adapter (+ merged export for 9.5)
+    top = rows[0] if test_key is None else next(r for r in rows if r["key"] == test_key)
+    final_path = run_dir / ("final.json" if test_key is None else f"final_{test_key}.json")
     if final_path.exists():
         return {**out, "final": json.loads(final_path.read_text()), "spent_usd": spent()}
-    if spent() + (3 * G.probe_eval_s + 600) * rate > max_usd:
+    if spent() + (4 * G.probe_eval_s + 300) * rate > max_usd:      # 2,000 test generations ~ 4 dev passes
         log("budget: no room for the test pass; stopping before it")
         return {**out, "status": "budget_stop", "spent_usd": spent()}
     GS.load_adapter(pm, torch.load(run_dir / f"{top['key']}.pt", map_location="cpu", weights_only=False))
     test = GS.encode_rows(sft.load_rows(SCALE_DIR / "test.jsonl"), tok)
     tcps = [r["passages"] or [] for r in test.rows]
     tgens = {}
-    for mode in ("plain", "copy2"):
+    for mode in ("plain", "copy2"):                 # each mode saved as it finishes; a restart skips it
+        part = run_dir / f"test_{top['key']}_{mode}.jsonl"
+        if part.exists():
+            tgens[mode] = [json.loads(ln) for ln in part.read_text().splitlines() if ln.strip()]
+            log(f"test {mode}: kept from an earlier launch")
+            continue
+        if spent() + 2 * G.probe_eval_s * rate > max_usd:
+            log(f"budget: stopping before test {mode}")
+            return {**out, "status": "budget_stop", "spent_usd": spent()}
         g = E.generate_batch(pm, tok, [r["prompt"] for r in test.rows], [len(c) for c in tcps], device,
                              tau=top["tau"]["tau"], batch=G.gen_batch, autocast=ac,
                              copy_passages=tcps if mode == "copy2" else None)
         tgens[mode] = _gens(test.rows, g)
+        part.write_text("".join(json.dumps(x) + "\n" for x in tgens[mode]))
+        volume.commit()
+        log(f"test {mode}: done")
     tft = GS.teacher_forced(pm, test, dec, device, autocast=ac)
     lm = GS.causal_lm(pm)
     guards = {"heldout": GS.heldout_bpb(pm, tok, src_tok, val_dir, subset, device, ac),
               "casehold": EF.score_casehold(lm, tok, items, device, ac, items_per_batch=8,
                                             prefix_id=tok.bos_token_id, softcap=cap)}
-    pm.save_pretrained(run_dir / "adapter")
+    pm.save_pretrained(run_dir / ("adapter" if test_key is None else f"adapter_{test_key}"))
     s_before = GS.prompt_scores(pm, tok, prompts[:32], device, autocast=ac)
     merged = pm.merge_and_unload()
     s_after = GS.prompt_scores(merged, tok, prompts[:32], device, autocast=ac)
-    merged.save_pretrained(run_dir / "merged", safe_serialization=True)
-    tok.save_pretrained(run_dir / "merged")
-    (run_dir / "merged" / "raft_format.json").write_text(json.dumps({
+    if test_key is None:
+        merged.save_pretrained(run_dir / "merged", safe_serialization=True)
+        tok.save_pretrained(run_dir / "merged")
+    (run_dir / ("merged" if test_key is None else f"adapter_{test_key}") / "raft_format.json").write_text(json.dumps({
         "prompt": "<bos>Passage 1: ...\\nPassage k: ...\\nQuestion: ...\\nSource:", "refusal": config.RAFT.refusal,
         "decision": "s = P(' none') / (P(' none') + P(' Passage'))", "tau": top["tau"]["tau"]}, indent=2))
     final = {"key": top["key"], "tau": top["tau"]["tau"], "test_gens": tgens,
@@ -469,6 +482,19 @@ def _lora_runs(max_usd: float, which: str, runs: list[dict]) -> dict:
 @app.function(image=image, gpu=G.gpu, volumes=VOLUMES, cpu=8.0, memory=65_536, timeout=60 * 90)
 def pilot(max_usd: float, lrs: tuple[float, ...] = G.pilot_lrs) -> dict:
     return _lora_runs(max_usd, "pilot", [{"n": G.pilot_size, "lr": lr, "evals": G.pilot_evals} for lr in lrs])
+
+
+@app.function(image=image, gpu=G.gpu, volumes=VOLUMES, cpu=8.0, memory=65_536, timeout=60 * 40)
+def test5k(max_usd: float) -> dict:
+    """D-32: the test pass on the selected 5K / LR 3e-5 pilot model (instead of the 20K run)."""
+    return _lora_runs(max_usd, "pilot", [], test_key=f"n{G.pilot_size}-lr{G.low_lrs[0]:g}")
+
+
+@app.local_entrypoint()
+def test5k_check(confirm: bool = False, max_usd: float = 1.4):
+    """D-32 (paid: 1 x H100). Requires --confirm."""
+    _gate(confirm, max_usd, "9.5-test-5k")
+    _report("pilot", test5k.remote(max_usd))
 
 
 @app.function(image=image, gpu=G.gpu, volumes=VOLUMES, cpu=8.0, memory=65_536, timeout=60 * 150)

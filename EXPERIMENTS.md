@@ -517,6 +517,28 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 - **Pre-registered reading (docs/10-gemma.md §1):** ≥ 0.60, so the data is sound and SLM-125M (0.316) is
   size-limited. Fine-tuning's main effect on Gemma is refusing (recall 0.25 → 0.90).
 
+### E-40 · 10.0 Is slm-500m-base trained on our dev/test passages? (2026-10-27; local, $0)
+- **By construction, probably yes:**
+  - its corpus uses our sources and budgets (case-law `us` all, PleIAs/SEC all, the fineweb-edu
+    sample-10BT prefix);
+  - its validation split is by window (every 100th), so ≈ 99% of every document is training text.
+- **Measured** (`membership_check.py`): per-passage bits/byte, 40 passages per source.
+  - Train passages: our 125M 0.819, 500M 0.770.
+  - Dev/test passages: 0.867 vs 0.809.
+  - The 500M/125M ratio is **0.925 on train vs 0.930 on dev/test**: no extra advantage on dev/test.
+    Calibrated against our 125M's 3.5% train/val gap, memorisation of that size would have put the ratio
+    near 0.89.
+  - SEC dev/test passages are harder for both models (+0.18): a selection effect of the < 10% 13-gram
+    overlap rule (E-20), not memorisation.
+- **Reading:** familiarity with dev/test is not measurably higher for the 500M. Passage-level memorisation
+  is small at this scale (our 125M: case law +0.011, web −0.045 on its own training passages). The overlap
+  can't be ruled out, so `docs/11-slm500m-raft.md` §2 layers an unseen-text baseline, a closed-book probe,
+  a control with the same overlap and an optional fresh test set.
+- **Also found:**
+  - the 500M is ≈ 7% better in bits/byte than our 125M on this text;
+  - its `config.json` bos/eos ids (1/2) disagree with its tokenizer (0/1);
+  - it uses the same special-token layout and the same RAFT decision structure as ours.
+
 ## Decision log
 
 | ID | Date | Decision | Why |

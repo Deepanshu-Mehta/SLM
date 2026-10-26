@@ -253,3 +253,27 @@ Shared code changed only by the one added function (`git diff --stat`).
 - It now times CaseHOLD on 200 items (the full base score runs in 10.5), and tries micro-batch 16 only
   if 32 runs out of memory.
 - Estimate ≈ $0.55, cap $0.80.
+
+### 10.4 GPU probe: DONE (2026-10-27; $0.28 of $0.80; 0 containers)
+| What | Result |
+|---|---|
+| micro-batch 32 (26 SFT + 6 replay), compiled | **0.69 s/step**, peak 56.2 GB (micro 16 not needed); 8 steps incl. compile 49 s |
+| teacher-forced dev (499) | 2.1 s |
+| `copy2` generation, 64 dev rows (base model: an upper bound) | 5.7 s, so ≈ 45 s for dev |
+| held-out bits/byte (600 windows, tokenizer-free) | 7.2 s; **500M base 0.6449** |
+| CaseHOLD, 200 items | 3.6 s (≈ 65 s for 3,600); PMI 0.695 on these 200 |
+| replay store | 27,954 windows |
+
+**Closed-book probe of the base models** (3-shot Q/A, no passages, 500 test A questions; token-F1 ≥ 0.5
+against the reference, with answers containing a shot answer excluded; deterministic, no judge):
+- SLM-125M **0**, author's 125M **0**, 500M **2 of 500 (0.4%)**. One of the two repeats the question's
+  own wording.
+- The base models mostly echo the shots.
+- **No knowledge of the test facts at the base level**, consistent with 10.1. The original test set stays
+  the headline (§4).
+
+**Re-derived costs:**
+- **10.5 pilot ≈ $1.6** (2 arms × 291 steps, 4 evals each, plus the full base guards; cap $3.0);
+- **10.6 full ≈ $2.3** (1,155 steps, 8 evals, test, guards, export; cap $4.5);
+- **10.7 control ≈ $0.9**.
+- These are below the plan (§6): the step is 0.69 s, not 1.25 s.

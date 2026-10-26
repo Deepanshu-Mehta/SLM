@@ -396,8 +396,8 @@ class Slm500Config:
     replay_tokens: int = 30_000_000                     # re-tokenized train-corpus windows (7.8 drew 14M per 20K run)
     gpu: str = "H100"
     # measured by the 10.4 probe (0 = not yet; 10.5/10.6 refuse to start)
-    probe_step_s: float = 0.0
-    probe_eval_s: float = 0.0
+    probe_step_s: float = 0.70          # 10.4: 0.69 s/step at micro 32 (compiled), peak 56 GB
+    probe_eval_s: float = 60.0          # 10.4: bpb 7 s + dev copy2 generation ~45 s (base-model upper bound) + teacher-forced 2 s
 
 
 SLM500 = Slm500Config()

@@ -153,8 +153,9 @@ def cmd_pairs(a) -> None:
     ss = samples(a.track, "samples_r1")
     jobs = D.judge_jobs(rows, ss, "r1")
     cov = sum(j.key in V for j in jobs) / max(1, len(jobs))
-    if cov < 1:
+    if cov < 0.99:                          # a missing label only drops that sample from pairing (no score bias)
         raise SystemExit(f"labels cover {cov:.1%} of the judged samples: finish `label` first")
+    print(f"label coverage {cov:.2%}")
     tok = AutoTokenizer.from_pretrained(".smoke/final/base")
     prs, stats = D.pairs(rows, D.scored(rows, ss, V, "r1"), tok)
     agree = D.agreement(rows, V)

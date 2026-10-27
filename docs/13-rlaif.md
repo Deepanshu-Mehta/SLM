@@ -226,3 +226,39 @@ would cost ≈ $10 without round 2 (plan ≈ $6.5, **+54%**), so it **comes back
 **Noted:** with transformers 4.57, Gemma 3's model generation config silently sets **top-p 0.95** (our explicit
 1.0 equals the library default, so it is overridden). Gemma 3's samples (12.1 and 12.3) come from a
 slightly narrower nucleus than SLM-125M's. Format validity is unaffected (0.997).
+
+### 12.3–12.5 status (2026-10-27 ≈ 12:45 IST)
+**12.3 sampling, finished on the deployed app:**
+- SLM-125M 6,400 samples (format 0.9989), $0.13; Gemma 3 6,400 (0.9986), $0.29.
+- 12.3 total ≈ $1.03 of $1.10.
+- **Deploy mode** (user-approved): `modal deploy rlaif_app.py` + `rlaif_launch.py spawn`, so jobs run on Modal
+  whatever the laptop does.
+
+**12.4 labels** ($3.32 of $6.00 so far):
+- SLM-125M 4,676 / 4,676 (99.91% parsed).
+- Gemma 3 2,400 / 3,369. Its batch stalled, then **Gemini returned 402 (prepaid credits depleted)**.
+
+**SLM-125M pairs** (`pairs_r1_stats.json`): **1,316 pairs from 565 prompts**.
+- Kinds: answer>answer 899, refuse>answer 324, answer>refuse 93.
+- Length ratio on answer pairs 1.086 (< 1.15: no flag).
+- Judge–label agreement: A 1.00, B3 1.00, B2 0.931, C 1.00.
+- Scores: 2 → 2,902; 5 → 987; 1 → 490; 3 → 153; 4 → 140. Most samples score 2, and equal scores make no
+  pair, hence half the expected pairs.
+- **Deviation:** 2 DPO epochs instead of 1 (83 steps).
+- Label coverage rule relaxed from 100% to ≥ 99% for pairing: a missing label only drops that sample.
+
+**12.5 DPO pilot, SLM-125M** (deployed, $0.43 of the 12.5 GPU cap):
+- **Forgetting:** bits/byte 0.7181 vs SFT 0.7179 (+0.0002) and +0.0091 vs the pretrained base (gate ✅).
+- **Decision drift:** at τ 0.7, over-refusal rose to 0.57–0.64 (β 0.1) and 0.20 (β 0.3), because
+  refuse>answer pairs dominate. The pre-registered τ rule re-tunes to τ 0.95 for both.
+
+**Dev proxies at the re-tuned τ (`copy2`):**
+
+| | τ | Proxy grounded | Proxy hallucination | Over-refusal | Refusal recall |
+|---|---|---|---|---|---|
+| SFT (7.8) | 0.70 | 0.389 | 0.032 | 0.018 | 0.871 |
+| DPO β 0.1 | 0.95 | 0.276 | 0.014 | 0.236 | 0.952 |
+| DPO β 0.3 | 0.95 | 0.371 | 0.040 | 0.029 | 0.847 |
+
+The proxy can't see unsupported answers, the main target. **J1 on these dev outputs is blocked by the
+depleted Gemini credits** (402 at submission).

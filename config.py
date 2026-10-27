@@ -467,7 +467,7 @@ class RlaifConfig:
     replay_weight_slm: float = 1.0
     pairs_per_step: int = 32
     micro_pairs: int = 8
-    epochs: int = 1
+    epochs: int = 2                     # 12.4: ~1.3K pairs (half the expected) -> 2 epochs, ~82 steps (deviation, recorded)
     evals: int = 2
     # 12.1 go/no-go (pre-registered): best-of-8 grounded >= greedy + 0.10, or B2 any-refusal >= greedy B2 recall + 0.15
     go_grounded_gain: float = 0.10
@@ -481,7 +481,7 @@ RLAIF = RlaifConfig(lr={"slm125": 2e-6, "gemma3": 1e-6})
 RLAIF_STAGE_CAPS_USD: Mapping[str, float] = {
     "12.1-headroom-gpu": 0.6,
     "12.1-judge": 1.2,
-    "12.3-sample-gpu": 1.0,
+    "12.3-sample-gpu": 1.1,               # raised from 1.0 after a sleep-cancelled run (user-approved, deploy mode)
     "12.4-labels": 6.0,
     "12.5-dpo-gpu": 1.5,
     "12.5-judge": 1.0,

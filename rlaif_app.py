@@ -312,9 +312,15 @@ def headroom_check(confirm: bool = False, max_usd: float = 0.6, track: str = "")
 
 
 @app.local_entrypoint()
-def sample_check(confirm: bool = False, max_usd: float = 1.0):
-    """12.3 (paid: 1 x L40S per track)."""
+def sample_check(confirm: bool = False, max_usd: float = 1.0, track: str = ""):
+    """12.3 (paid: 1 x L40S per track). --track to run one track (resumes from a partial file)."""
     _gate(confirm, max_usd, "12.3-sample-gpu")
+    if track:
+        rep = {"slm125": sample_slm, "gemma3": sample_g3}[track].remote(max_usd)
+        (LOCAL / track).mkdir(parents=True, exist_ok=True)
+        (LOCAL / track / "sample_report.json").write_text(json.dumps(rep, indent=2))
+        print(track, json.dumps(rep))
+        return
     _both(sample_slm, sample_g3, max_usd, "sample")
 
 

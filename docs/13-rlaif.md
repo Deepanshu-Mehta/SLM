@@ -210,3 +210,19 @@ the headroom preference optimization needs. Best-of-8 is an upper bound (oracle 
 
 **Re-costed 12.3–12.4** at the measured rates: sampling ≈ $1.6 (plan ≈ $0.5) and labels ≈ $5.8. The phase
 would cost ≈ $10 without round 2 (plan ≈ $6.5, **+54%**), so it **comes back to the user** (§5 rule).
+
+### 12.2–12.3 Smaller run (user's choice after the re-cost) (2026-10-27): IN PROGRESS
+**Prompts:** 1,600, K = 4 for every row (6,400 samples per track): all 380 B2, 151 B3 and 246 C, plus 823 A
+(seeded subset). The full 2,301-row set is kept as `.smoke/rlaif/prompts_full.jsonl`.
+
+**Sampling:**
+- **The first launch didn't start:** a zsh loop passed malformed arguments (zsh doesn't word-split `$VAR`;
+  AGENT_BRIEF gotcha). $0.
+- **The second launch was cancelled after ≈ 8 min** (≈ $0.60): the Mac slept on battery while `caffeinate -i`
+  was active, so a closed lid or forced sleep, which `caffeinate` can't block.
+- **Saved progress** (written per 64-row chunk): SLM-125M 1,088 / 1,600 rows, Gemma 3 832 / 1,600 rows.
+- Remaining ≈ $0.42, so 12.3 ≈ $1.02 against its $1.00 cap.
+
+**Noted:** with transformers 4.57, Gemma 3's model generation config silently sets **top-p 0.95** (our explicit
+1.0 equals the library default, so it is overridden). Gemma 3's samples (12.1 and 12.3) come from a
+slightly narrower nucleus than SLM-125M's. Format validity is unaffected (0.997).

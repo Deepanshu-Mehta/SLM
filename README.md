@@ -4,8 +4,10 @@ A **125.8M-parameter** Llama-style language model trained from scratch, with a f
 fresh weights, on US court opinions, SEC filings and educational web text. A grounded fine-tune of it
 (**SLM-125M-RAFT**) then learned to answer **only from passages it is given**: it names the passage,
 quotes it word for word and answers, or refuses. A scale study then put the same grounded-QA training
-on three other models to separate **model size** from **pretraining scale** (Part 3). Everything runs on
-[Modal](https://modal.com), and every number below comes from a run artifact.
+on three other models to separate **model size** from **pretraining scale** (Part 3). Finally,
+preference optimization with AI feedback (RLAIF → DPO) was tried on the best models of each kind
+(Part 4, round 1). Everything runs on [Modal](https://modal.com), and every number below comes from a run
+artifact.
 
 | | **SLM-125M (base)** | **SLM-125M-RAFT (grounded)** |
 |---|---|---|
@@ -227,6 +229,68 @@ this project.
 
 ---
 
+## Part 4: preference optimization with AI feedback (RLAIF → DPO), round 1
+
+The fine-tuned models already get the format right. What remains is **choosing**: whether to answer, and
+which span to answer from. Preference optimization teaches choices, but only between options the model
+already produces. That was measured first.
+
+**Method** (following the course's [RLHF](https://slm-rlhf.vercel.app) and
+[preference-data](https://slm-rlhf-data.vercel.app) walk-throughs, with DPO in place of reward model + PPO):
+1. **Prompts:** 1,600 verified questions never used in training (answerable, near misses, no relevant
+   passages, tasks).
+2. **Samples:** 4 on-policy samples per prompt from each fine-tuned model.
+   - The answer/refuse decision is *sampled* from the model.
+   - Quotes stay verbatim (copy-constrained).
+   - A format constraint keeps the syntax rigid, so temperature 0.8 acts on content only: 99.9% of
+     samples parse.
+3. **AI feedback:** Gemini Flash scores every distinct valid sample 1–5 against a written constitution:
+   - refuse only when the passages lack the answer;
+   - every claim must be in the cited passage, with a quote that backs it;
+   - the answer must match the reference;
+   - concise, not long.
+4. **Pairs:** samples whose scores differ by ≥ 2 become chosen/rejected.
+   - Length bias is checked on answer pairs (chosen/rejected length ratio 1.09 and 1.06, limit 1.15).
+   - Judge agreement with the construction labels is ≥ 93% on every question kind.
+5. **DPO:** against the fine-tuned model as the frozen reference, plus a small SFT term on the chosen answer
+   and pretraining replay for the 125M; β ∈ {0.1, 0.3}. Checkpoints, τ and the pick follow pre-registered
+   rules.
+
+**Models:** SLM-125M (ours; the only one with forgetting headroom) and Gemma 3 270M (the best small
+model; it missed only the hallucination target). The 500M had no forgetting headroom, and Gemma 2 2B
+already met every target.
+
+**Headroom check (go/no-go), dev:** the best of 8 samples is grounded on **56.4%** of questions for
+SLM-125M (greedy 34.9%) and **80.4%** for Gemma 3 (greedy 65.8%). Both passed.
+
+**Round 1 results (dev, judged; the test set has not been used yet):**
+
+| Dev, copy-constrained | Grounded | Hallucination | Near-miss refusal | Over-refusal | Δ bits/byte vs SFT |
+|---|---|---|---|---|---|
+| SLM-125M-RAFT (SFT) | 34.9% | 30.9% | 66.7% | 1.8% | |
+| **+ DPO β 0.3 (pick)** | **36.4%** | **29.3%** | 69.4% | 2.9% | +0.0002 |
+| + DPO β 0.1 | 29.1% | 22.6% | 91.7% | 23.6% ❌ | +0.0002 |
+| Gemma 3 270M RAFT (SFT) | 65.8% | 19.2% | 80.6% | 2.5% | |
+| **+ DPO β 0.1 (pick)** | 65.5% | **17.6%** | **88.9%** | 6.2% | +0.016 |
+
+**What it shows:**
+- **Preference optimization moved the decision more than the answers.** Near-miss refusal rose by up to 8
+  points, and hallucination fell by 1.6 points for both models.
+- **That misses the pre-registered bar** of a 5-point hallucination drop with no loss of grounded accuracy.
+- **At β 0.1 the 125M over-learned refusing** (it refused 24% of answerable questions), so β 0.3 was picked.
+- **The reason is visible in the data.** Most samples scored 2/5, and equal scores make no pair. So right
+  answers were rarely contrasted with wrong ones (1,316 and 872 pairs, about half the expected number);
+  most pairs taught refusing.
+- **A second round would target that:** more samples per answerable question, and pairs only from clearly
+  right vs clearly wrong answers.
+- **Judge overlap is a known risk:** the labeller and the evaluation judge are both Gemini Flash (different
+  prompts). Deterministic metrics, an independent judge and human spot-checks are planned for the final
+  test pass.
+- **Cost of round 1:** ≈ $7.45 (GPU $2.56, Gemini $4.89).
+- Write-up: [`docs/13-rlaif.md`](docs/13-rlaif.md).
+
+---
+
 ## Reproduce
 
 **Prerequisites:**
@@ -311,7 +375,21 @@ modal run --detach gemma3_app.py::pilot_check --confirm && modal run --detach ge
 python raft_pipeline.py judge --stage gemma3 --confirm && python raft_pipeline.py score --stage gemma3
 ```
 - **Keep the laptop awake** (`caffeinate -i`). Idle sleep makes Modal cancel a running job after about
-  two minutes, even with `--detach`.
+  two minutes, even with `--detach`. Part 4 avoids this by deploying its app and spawning jobs.
+
+### Part 4 (RLAIF → DPO): GPU jobs run on a deployed private app, so a sleeping laptop can't cancel them
+
+```bash
+python -c "import rlaif_data as D; D.write_jsonl(D.LOCAL/'prompts.jsonl', D.build_prompts())"   # spare verified prompts
+modal deploy rlaif_app.py && modal run rlaif_app.py::upload_prompts
+python rlaif_launch.py spawn headroom_slm 0.3 --confirm && python rlaif_launch.py spawn headroom_g3 0.3 --confirm
+python rlaif_pipeline.py fetch --track slm125 --what headroom      # and gemma3
+python rlaif_pipeline.py headroom-judge --confirm && python rlaif_pipeline.py headroom-score   # go / no-go
+python rlaif_launch.py spawn sample_slm 0.5 --confirm               # and sample_g3; then fetch --what samples
+python rlaif_pipeline.py label --track slm125 --confirm && python rlaif_pipeline.py pairs --track slm125
+python rlaif_launch.py spawn dpo_slm 0.75 --confirm                 # and dpo_g3; `status` shows progress
+python rlaif_pipeline.py dpo-judge --track slm125 --confirm
+```
 
 ## Repository layout
 
@@ -330,8 +408,9 @@ python raft_pipeline.py judge --stage gemma3 --confirm && python raft_pipeline.p
 | `gemma_sft.py`, `gemma_app.py`, `smoke_gemma.py` | Part 3, Gemma 2 2B: trainer (LoRA or full fine-tuning; logits only at target positions for the 256K vocabulary), Modal jobs, local checks |
 | `slm500_app.py`, `smoke_slm500.py`, `membership_check.py` | Part 3, the 500M: RAFT jobs (replay re-tokenized from our corpus), local checks, the train/test overlap test |
 | `gemma3_app.py`, `smoke_gemma3.py` | Part 3, Gemma 3 270M: Modal jobs (transformers 4.57.6, separate venv `.venv-g3`), local checks |
+| `rlaif_data.py`, `dpo.py`, `rlaif_app.py`, `rlaif_launch.py`, `rlaif_pipeline.py`, `smoke_rlaif.py` | Part 4: prompts, constitution judge and pairs; DPO trainer; Modal jobs (deployed) and launcher; judging/headroom/labels CLI; local checks |
 | `migrate_app.py` | One-off: copied the Modal Volume to a new Modal account (volume to volume) |
-| `docs/` | `MASTER_PLAN.md`, one document per phase with measured results (`08-raft.md` = Phase 7, `09-raft-release.md` = Phase 8, `10`–`12` = the scale study) |
+| `docs/` | `MASTER_PLAN.md`, one document per phase with measured results (`08-raft.md` = Phase 7, `09-raft-release.md` = Phase 8, `10`–`12` = the scale study, `13-rlaif.md` = preference optimization) |
 | `EXPERIMENTS.md` | Experiment / decision / correction log (the E-, D- and C- IDs the docs cite) |
 | `GUIDE.md`, `INITIAL.md` | The original specifications |
 
@@ -357,6 +436,9 @@ The website's source is not in this repository; the live site is linked above.
 - **Pre-registered readings.** Every comparison had its decision rule written down before the run. When a
   forgetting gate failed, the run stopped and the choice (lower LR, LoRA, or report it) was made explicitly
   and logged (`EXPERIMENTS.md` D-30–D-35).
+- **Measure headroom before preference optimization.** Best-of-8 against greedy decided whether DPO had
+  anything to choose from. Then a format constraint kept sampled answers syntactically valid, so no pair
+  ever penalized good grounding for a syntax slip.
 - **Judging with a partial set of verdicts is wrong, not low.** A missing verdict counts against the model, so
   `raft_pipeline.py score` records `j1_coverage`, and incomplete sets are never reported.
 
@@ -369,7 +451,8 @@ The website's source is not in this repository; the live site is linked above.
   - misses three of its seven pre-set targets (above);
   - weak on near-miss questions;
   - limited to 4 passages of about 160 tokens by the 1,024-token context.
-- **No preference or safety tuning.**
+- **No safety tuning.** Preference optimization (Part 4) is one round, evaluated on dev only so far; it
+  missed its pre-registered bar.
 - **Scale study:** one seed per setting. Gemma 2 2B was tested at 5K rows (it met every target there).
   Gemma 3 270M's forgetting gate was not met. Gemma models carry Google's Gemma terms.
 

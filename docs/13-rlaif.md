@@ -262,3 +262,58 @@ slightly narrower nucleus than SLM-125M's. Format validity is unaffected (0.997)
 
 The proxy can't see unsupported answers, the main target. **J1 on these dev outputs is blocked by the
 depleted Gemini credits** (402 at submission).
+
+### 12.4–12.5 completed after the credit top-up (2026-10-27 ≈ 13:10 IST)
+**Labels:**
+- Gemma 3 3,369 / 3,369: the stalled batch resumed once the credits returned.
+- **12.4 total $3.77 of $6.00.** The Kaggle key the user offered is not a Gemini API key (`API_KEY_INVALID`).
+  Its model proxy is scoped to Kaggle Benchmarks and lists other Gemini versions, so it was not used.
+
+**Gemma 3 pairs:** **872 from 462 prompts**.
+- Kinds: answer>answer 708, refuse>answer 98, answer>refuse 66.
+- Length ratio 1.057 (no flag).
+- Agreement: A 1.00, B3 1.00, B2 0.946, C 0.997.
+
+**Gemma 3 DPO:**
+- Deployed, $0.58. The 12.5 GPU total is **$1.01 of $1.50**.
+- Bits/byte vs its SFT checkpoint: +0.016 (β 0.1) / +0.014 (β 0.3), within the +0.02 "no further drift" gate.
+
+**Dev, J1, `copy2`** (τ re-chosen by the pre-registered rule; 12.5 J1 $0.42 of $1.00):
+
+| | τ | Grounded | Hallucination | Refusal recall (B2) | Over-refusal | Citation | Quote fidelity |
+|---|---|---|---|---|---|---|---|
+| **SLM-125M SFT** (7.8) | 0.70 | 0.349 | 0.309 | 0.871 (0.667) | 0.018 | | |
+| SLM-125M DPO β 0.1 | 0.95 | 0.291 | **0.226** | 0.952 (**0.917**) | **0.236 ❌** | 0.900 | 0.996 |
+| **SLM-125M DPO β 0.3 (pick)** | 0.95 | **0.364** | 0.293 | 0.847 (0.694) | 0.029 | 0.918 | 0.997 |
+| **Gemma 3 SFT** (11.4) | 0.75 | 0.658 | 0.192 | 0.927 (0.806) | 0.025 | | |
+| **Gemma 3 DPO β 0.1 (pick)** | 0.80 | 0.655 | **0.176** | 0.952 (**0.889**) | 0.062 | 0.969 | 0.986 |
+| Gemma 3 DPO β 0.3 | 0.90 | 0.669 | 0.184 | 0.935 (0.833) | 0.040 | 0.970 | 0.976 |
+
+**Pre-registered pick:** the lowest dev hallucination among arms with grounded ≥ SFT − 0.02, over-refusal ≤ 0.20
+and the gate passed.
+- **SLM-125M: β 0.3.** β 0.1 fails over-refusal, 0.236, and loses 0.058 grounded.
+- **Gemma 3: β 0.1.**
+
+**Reading (dev):**
+- **Round 1 does not meet the success bar** (hallucination −0.05) for either model:
+  - SLM-125M β 0.3: −0.016 hallucination, +0.015 grounded;
+  - Gemma 3 β 0.1: −0.016 hallucination, −0.003 grounded.
+- **The clearest effect is on the decision.** Near-miss refusal rises by +0.03 (SLM-125M β 0.3) to +0.08
+  (Gemma 3 β 0.1). The pairs most often prefer refusing on unanswerable items (refuse>answer 324 / 98).
+  At β 0.1 the 125M over-learns it (over-refusal 0.236).
+- **Unsupported answers barely move.** Most samples score 2 (wrong or unsupported) and equal scores make
+  no pair, so wrong-span answers are rarely contrasted with right ones. Pair counts were 1,316 and 872,
+  about half the ≈ 2–3K expected.
+- **Not run (not approved):** the test pass (12.7) and round 2 (12.6).
+  - Likely levers for a round 2: K = 8 everywhere and the full 2,301 prompts, for more right-vs-wrong
+    answer pairs; a higher LR (the margins grew but the policy moved little at 1–2e-6); re-sampling from the
+    round-1 policy.
+
+**Phase 12 spend so far ≈ $7.45:**
+- 12.1: GPU $0.52 + J1 $0.70;
+- 12.3: GPU $1.03;
+- 12.4: labels $3.77;
+- 12.5: GPU $1.01 + J1 $0.42.
+
+That is against the ≈ $7.1 approved for the smaller run (+5%). The deployed `slm-125m-rlaif` app is idle
+($0); 0 containers.

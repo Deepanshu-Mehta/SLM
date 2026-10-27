@@ -581,6 +581,22 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   - 4× parameters on our corpus: +0.03;
   - ≈ 750× pretraining at about our size: +0.33.
 
+### E-44 · Phase 12 round 1: RLAIF (Gemini Flash constitution) → DPO on SLM-125M and Gemma 3 270M (2026-10-27; ≈ $7.45)
+- **12.1 headroom, dev best-of-8 grounded:** SLM-125M 0.564 vs greedy 0.349; Gemma 3 0.804 vs 0.658. GO for both.
+  Sample format validity 1.000 / 0.997 at T 0.8 (FormatConstraint as a safety net; the unconstrained 125M
+  was already 96/96).
+- **Pairs** (score gap ≥ 2): 1,316 / 872.
+  - Length ratio 1.09 / 1.06.
+  - Judge–label agreement ≥ 0.93 on every bucket.
+- **DPO** (2 epochs, LR 2e-6 / 1e-6, α 0.2, replay for 125M; dev J1):
+  - SLM-125M β 0.3: hallucination 0.309 → 0.293, grounded 0.349 → 0.364, B2 0.667 → 0.694;
+  - SLM-125M β 0.1: hallucination 0.226, but over-refusal 0.236 and grounded −0.058;
+  - Gemma 3 β 0.1: hallucination 0.192 → 0.176, B2 0.806 → 0.889, grounded 0.658 → 0.655.
+  - Bits/byte: 125M +0.0002 vs SFT; Gemma 3 +0.016 vs SFT.
+- **Reading:** round 1 shifts the decision (more near-miss refusals) but barely reduces unsupported answers.
+  The −0.05 hallucination bar is not met on dev. Most samples score 2, so wrong-span answers are rarely
+  paired against right ones.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -620,6 +636,7 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | D-33 | 10-27 | Phase 11 (Gemma 3 270M): the pilot uses 2 evals per arm, not 4 | The 11.2 probe put the phase at ≈ $4.1 with 4 evals, +37% over the quote; with 2 (as Phase 9's pilot) it is ≈ $3.8 (+25%) |
 | D-34 | 10-27 | Gemma 3 270M full fine-tuning failed the gate at both LRs (+0.149 / +0.296). **Keep the gate and switch to LoRA** (Gemma 2B's settings) at LR {1e-4, 3e-5} | User's choice, consistent with D-31. Full fine-tuning moves the 168M embedding parameters (63% of the model); LoRA freezes them |
 | D-35 | 10-27 | Gemma 3 270M: **no tested setting passes the +0.02 gate** (full fine-tuning +0.15/+0.30; LoRA +0.04/+0.07, and LoRA learns far less). The gate is reported, not enforced, for Gemma 3 only (as CaseHOLD for SLM-125M, D-23). The 20K run is full fine-tuning at LR 2e-5 (best judged 5K arm, dev grounded 0.542), checkpoint = best dev proxy over all evals, test once; forgetting recorded as missed | User's choice. Answers the pre-registered size-vs-pretraining question on test while reporting the forgetting cost plainly |
+| D-36 | 10-27 | Phase 12 run smaller than planned (1,600 prompts, K = 4) after re-costing at measured rates (+54% → +9%); GPU jobs moved to a **deployed** private Modal app (`rlaif_launch.py spawn`) because laptop sleep cancelled `--detach` runs; Kaggle key not used (not a Gemini key; proxy benchmark-scoped, different models) | User's choices. Keeps the judge model fixed (gemini-3.8-flash) so all numbers stay comparable |
 
 ## Corrections log
 

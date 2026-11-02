@@ -597,6 +597,24 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
   The −0.05 hallucination bar is not met on dev. Most samples score 2, so wrong-span answers are rarely
   paired against right ones.
 
+### E-45 · Bootstrap intervals on the frozen sets (2026-11-02; local, $0)
+- **Method:** 5,000 document-cluster bootstrap resamples, paired where models are compared (1,000 test items
+  in 542 documents; 499 dev items in 269). Item outcomes follow `score_eval`. This measures sampling noise
+  only, not seed variance. Script and full output: `.smoke/reports/bootstrap_ci.{py,txt}` (local).
+- **Test, grounded (95%):** SLM-125M 0.316 (0.275–0.357), 500M 0.346 (0.306–0.385), Gemma 3 0.644
+  (0.599–0.687), Gemma 2 0.912 (0.884–0.937).
+- **Typical half-widths on test:** grounded ±4 points, hallucination ±3, refusal recall ±4–5, near miss ±10
+  (n = 100). On dev, near miss is ±15 (n = 36).
+- **Paired on test:**
+  - 500M − 125M: grounded +0.030 (−0.015, +0.074), B2 −0.090 (−0.171, 0.000);
+  - Gemma 3 − 125M: grounded +0.328 (+0.276, +0.380);
+  - Gemma 2 − Gemma 3: grounded +0.268 (+0.224, +0.312), refusal recall +0.010 (−0.025, +0.042).
+- **Paired on dev (DPO − SFT):**
+  - 125M: hallucination −0.016 (−0.049, +0.017), grounded +0.015 (−0.034, +0.061), B2 +0.028 (0.000, +0.091);
+  - Gemma 3: hallucination −0.016 (−0.052, +0.020), B2 +0.083 (0.000, +0.186), over-refusal +0.036 (+0.015, +0.061).
+- **Reading:** the scale study's large gaps stand. The 125M vs 500M gap is undetectable, not proven to be
+  zero. DPO round 1 has no established benefit on dev.
+
 ## Decision log
 
 | ID | Date | Decision | Why |
@@ -659,3 +677,6 @@ Measured on the released weights and tokenizer (`.smoke/final/base`):
 | C-15 | 7.8b regeneration capped at `--max-usd 0.15` | It cost $0.245; the 7.8 GPU stage is $2.07, $0.07 over its $2 cap | The guard checked only before generation, and the answer constraint's fallback is slow. Fixed: the budget is re-checked per 64-row chunk |
 | C-16 | 9.3 baselines capped at $1.00 (`--max-usd 1.0`, then 0.55 for the resume) | ≈ $1.04: the first run (≈ $0.45–0.49, 6 min) was cancelled from outside after dev; the resume cost $0.57, $0.02 over its 0.55 | The closed-book probe ran after the last budget check. Fixed: `baselines` now checks the budget before the closed-book pass too. The cancellation cause is unknown (the container logged a cancellation signal; no OOM or budget stop); later launches use `nohup` |
 | C-17 | C-16's "cancellation cause unknown" | **Known: the laptop idle-slept** (pmset: Idle Sleep 17:46:06 → cancel 17:48; 19:54:17 → cancel 19:56). After ~2 min without the local client, Modal cancels the running input even under `--detach`. The 5K test pass was lost this way after ≈ 7 min (≈ $0.53, nothing saved) | Launches are wrapped in `caffeinate -i`; the test pass now saves each decoding mode to the Volume as it finishes and skips saved modes on restart. The lid must stay open on battery |
+| C-18 | E-44, README Part 4, docs/13: DPO "shifts the decision", "near-miss refusal rose" | Not established: +1 and +3 of 36 items, 95% intervals include zero. The only clear shift is Gemma 3's over-refusal, +0.036 (E-45) |
+| C-19 | `/arena` (2026-10-27) published 1,499 evaluation items, and the agent reported it as verified | It included 549 raw case-law items with private parties' names, breaking the rule in docs/07 and the /about page. Live for 6 days, removed 2026-11-02: case law is never published and a screen fails the build. The screen is a regex, not a human review. The old deployment is behind Vercel login |
+| C-20 | Phase 12.7 test pass "≈ $0.5" (agent, 2026-10-27) | Plan says GPU ≈ $0.3 + judges ≈ $1.5; the pre-registered success rule needs J2, and neither the test job nor J2 exists yet. Estimate: $1–2 plus coding |

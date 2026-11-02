@@ -3,6 +3,8 @@
 **Status: DONE (2026-10-27; ≈ $5.5).** The 500M with RAFT (20K, LR 2e-5) scores test grounded **0.346**,
 against SLM-125M's 0.316 (Δ +0.030 < +0.05). Pre-registered reading: 4× parameters on the same corpus
 buys almost nothing; Gemma's gain came from pretraining scale. No dev/test overlap flagged (E-40, E-41).
+The 95% interval on that +0.030 is −0.015 to +0.074 (E-45), so the data show no detectable gain but cannot
+exclude one of about 7 points, which is still far below Gemma 3's +0.328.
 The author's-125M control is flagged (gate fallback to step 144). §8 has the details.
 
 Phase 9 showed SLM-125M's grounded-QA gap is model size, not data: Gemma 2 2B + LoRA met all seven targets

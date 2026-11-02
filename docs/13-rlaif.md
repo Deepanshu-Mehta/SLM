@@ -298,9 +298,10 @@ and the gate passed.
 - **Round 1 does not meet the success bar** (hallucination −0.05) for either model:
   - SLM-125M β 0.3: −0.016 hallucination, +0.015 grounded;
   - Gemma 3 β 0.1: −0.016 hallucination, −0.003 grounded.
-- **The clearest effect is on the decision.** Near-miss refusal rises by +0.03 (SLM-125M β 0.3) to +0.08
-  (Gemma 3 β 0.1). The pairs most often prefer refusing on unanswerable items (refuse>answer 324 / 98).
-  At β 0.1 the 125M over-learns it (over-refusal 0.236).
+- **Correction (2026-11-02, E-45, C-18): the near-miss rise is not established.** It is +1 and +3 of 36 items
+  (+0.03 for SLM-125M β 0.3, +0.08 for Gemma 3 β 0.1), and both 95% intervals include zero. The one clear
+  shift is Gemma 3's over-refusal, +0.036 (+0.015 to +0.061). The pairs most often prefer refusing on
+  unanswerable items (refuse>answer 324 / 98). At β 0.1 the 125M over-learns it (over-refusal 0.236).
 - **Unsupported answers barely move.** Most samples score 2 (wrong or unsupported) and equal scores make
   no pair, so wrong-span answers are rarely contrasted with right ones. Pair counts were 1,316 and 872,
   about half the ≈ 2–3K expected.

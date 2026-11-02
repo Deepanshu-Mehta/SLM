@@ -274,8 +274,10 @@ SLM-125M (greedy 34.9%) and **80.4%** for Gemma 3 (greedy 65.8%). Both passed.
 | **+ DPO β 0.1 (pick)** | 65.5% | **17.6%** | **88.9%** | 6.2% | +0.016 |
 
 **What it shows:**
-- **Preference optimization moved the decision more than the answers.** Near-miss refusal rose by up to 8
-  points, and hallucination fell by 1.6 points for both models.
+- **No change is distinguishable from noise except one, and that one is a cost.** Hallucination fell by 1.6
+  points on both models and near-miss refusal rose by 3–8 points (1 and 3 of 36 items), but the 95% intervals
+  include zero (hallucination −4.9 to +1.7 and −5.2 to +2.0). The only clear shift is that Gemma 3 refused
+  3.6 more points of answerable questions (+1.5 to +6.1).
 - **That misses the pre-registered bar** of a 5-point hallucination drop with no loss of grounded accuracy.
 - **At β 0.1 the 125M over-learned refusing** (it refused 24% of answerable questions), so β 0.3 was picked.
 - **The reason is visible in the data.** Most samples scored 2/5, and equal scores make no pair. So right

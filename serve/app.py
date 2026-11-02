@@ -148,7 +148,7 @@ def root() -> dict[str, Any]:
 @app.get("/info")
 def info() -> dict[str, Any]:
     return {**STATS, "serving": {
-        "hardware": "HF Spaces cpu-basic (2 vCPU)", "dtype": "float32", "context": MAX_CONTEXT,
+        "hardware": "Modal CPU (2 cores, 4 GiB), scales to zero", "dtype": "float32", "context": MAX_CONTEXT,
         "prompt_prefix": "<|eos|> (id 1)", "suppressed_partial_utf8_tokens": len(PARTIAL_UTF8_IDS)}}
 
 
